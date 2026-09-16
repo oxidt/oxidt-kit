@@ -248,7 +248,11 @@ so the address is admitted **whatever the registration policy says**, and the
 account is created on first login through the same path a verified OTP uses.
 The start-session response reports `password` (the flag) and `otp` (whether the
 emailed-code branch exists at all). Both are global, never per-address, so
-neither can be used to enumerate which addresses have a password.
+neither can be used to enumerate which addresses have a password. While
+`password_login` is on, `/auth/session/start` mails nothing — the person is
+about to type a password — and the page's "Email me a code instead" asks for
+one through `/auth/session/passkey-fallback-otp`, which carries the resend
+throttle.
 
 Without SMTP, build the state with `AuthState::local_without_email(user_store,
 passkey_store)`: `email_sender` is an `Option`, and every path that would send

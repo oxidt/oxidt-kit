@@ -402,16 +402,6 @@ pub fn LocalLoginPage(
         });
     };
 
-    // Password step → the emailed code. No request: /auth/session/start already
-    // sent one on any deployment that has a sender (which is what `otp` reports).
-    let on_use_emailed_code = move |_| {
-        error_msg.set(None);
-        success_msg.set(None);
-        password.set(String::new());
-        otp_code.set(String::new());
-        step.set(LoginStep::OtpCodeInput);
-    };
-
     // "Use email code instead" — passkey fallback to OTP
     let on_use_email_code = move |_| {
         spawn(async move {
@@ -429,6 +419,7 @@ pub fn LocalLoginPage(
                 match result {
                     Ok(_resp) => {
                         success_msg.set(Some("Verification code sent to your email.".to_string()));
+                        password.set(String::new());
                         otp_code.set(String::new());
                         step.set(LoginStep::OtpCodeInput);
                         is_loading.set(false);
@@ -903,9 +894,12 @@ pub fn LocalLoginPage(
                                 "Back"
                             }
                             if otp_available() {
+                                // Same endpoint the passkey steps fall back
+                                // through: it sends the code (throttled) and
+                                // we land on the OTP step once it has.
                                 button {
                                     class: "btn btn-ghost btn-sm text-primary",
-                                    onclick: on_use_emailed_code,
+                                    onclick: on_use_email_code,
                                     disabled: is_loading(),
                                     "Email me a code instead"
                                 }

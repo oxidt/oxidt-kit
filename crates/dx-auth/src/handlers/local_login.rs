@@ -338,16 +338,24 @@ async fn send_otp_session(
     )))
 }
 
-/// The start-session response for a deployment with no email sender: the
-/// password step is the only thing left to offer, and with `password_login`
-/// off there is nothing at all — which is the operator's mistake, not the
-/// caller's, so it is a 503 that says so.
+/// Offer the password step, and **send no mail**: on a deployment that has a
+/// password, the person is about to type it, so mailing a code every time
+/// would be a message per login attempt for an address that may never want
+/// one. `otp` still reports that the emailed branch exists, and the page asks
+/// for a code through `/auth/session/passkey-fallback-otp` (which carries the
+/// resend throttle) if the person wants one after all — one extra click, no
+/// unsolicited mail.
 ///
-/// Says nothing about the address. Without a mailer the registration gate and
-/// the captcha do not apply (the password step admits an address on the
-/// store's word alone), so `is_new_user` stays false rather than reporting
-/// whether the account exists.
-fn password_only_response(auth_config: &AuthConfig) -> AuthResult<Json<StartSessionResponse>> {
+/// With `password_login` off this is only reachable when there is no sender
+/// either, and then there is nothing to offer at all — the operator's mistake,
+/// not the caller's, so it is a 503 that says so.
+///
+/// Says nothing about the address: `is_new_user` stays false rather than
+/// reporting whether the account exists.
+fn password_step_response(
+    auth_state: &AuthState,
+    auth_config: &AuthConfig,
+) -> AuthResult<Json<StartSessionResponse>> {
     if !auth_config.password_login {
         return Err(AuthError::ServiceUnavailable(
             "This deployment has no email sender and no password login configured, so there is \
@@ -359,7 +367,7 @@ fn password_only_response(auth_config: &AuthConfig) -> AuthResult<Json<StartSess
     Ok(Json(StartSessionResponse {
         public_key_options: None,
         otp_sent: false,
-        otp: false,
+        otp: auth_state.email_sender.is_some(),
         password: true,
         is_new_user: false,
         has_passkeys: false,
@@ -402,7 +410,7 @@ pub async fn start_session(
         // provisions the account on the store's word alone — so neither the
         // registration gate nor the captcha has anything to guard here.
         if auth_state.email_sender.is_none() {
-            return password_only_response(&auth_config);
+            return password_step_response(&auth_state, &auth_config);
         }
 
         if !registration_allowed(&auth_state, &auth_config, &email).await? {
@@ -445,6 +453,10 @@ pub async fn start_session(
                     "No captcha configured; registration for '{email}' is gated by the allowlist alone"
                 );
             }
+            if auth_config.password_login {
+                // Nothing is mailed until asked for; see `password_step_response`.
+                return password_step_response(&auth_state, &auth_config);
+            }
             send_otp_session(&auth_state, &auth_config, &session, &email, true).await
         };
     };
@@ -485,11 +497,11 @@ pub async fn start_session(
         }));
     }
 
-    // Existing account with no passkey: the emailed code, or the password step
-    // when there is no mailer. No captcha — it gates account *creation*, and
-    // this address already has one.
-    if auth_state.email_sender.is_none() {
-        return password_only_response(&auth_config);
+    // Existing account with no passkey: the password step when this deployment
+    // has one (nothing is mailed until asked for), the emailed code otherwise.
+    // No captcha — it gates account *creation*, and this address already has one.
+    if auth_state.email_sender.is_none() || auth_config.password_login {
+        return password_step_response(&auth_state, &auth_config);
     }
     send_otp_session(&auth_state, &auth_config, &session, &email, false).await
 }
@@ -790,6 +802,10 @@ pub async fn resend_otp_handler(
 
 /// When the client-side passkey ceremony fails (cancelled, wrong device, no
 /// credential on this machine) the client asks us to switch to email OTP.
+///
+/// Also the "email me a code instead" path off the password step, which is why
+/// `start_session` can leave the mail unsent: this is the endpoint that has
+/// the resend throttle on it.
 pub async fn passkey_fallback_to_otp(
     Extension(auth_state): Extension<AuthState>,
     Extension(auth_config): Extension<AuthConfig>,
@@ -800,14 +816,18 @@ pub async fn passkey_fallback_to_otp(
         .await?
         .ok_or_else(|| AuthError::BadRequest("No login session in progress".to_string()))?;
 
-    // A new-user session never had a passkey to fall back *from*, and its OTP is
-    // gated behind the registration captcha (`/captcha/verify` is the only
-    // sanctioned OTP send for new users). Refuse here so this endpoint cannot be
-    // used to mint an account-creating OTP without solving the captcha.
-    if session
-        .get::<bool>(DEFERRED_NEW_USER_KEY)
-        .await?
-        .unwrap_or(false)
+    // A new-user session's OTP is gated behind the registration captcha
+    // (`/captcha/verify` is the only sanctioned OTP send for new users).
+    // Refuse here so this endpoint cannot be used to mint an account-creating
+    // OTP without solving the captcha — but only where there is a captcha to
+    // solve: with none configured, `start_session` sends that same OTP itself,
+    // so refusing would just leave a password-step visitor with no way to ask
+    // for a code.
+    if captcha_cfg().is_some()
+        && session
+            .get::<bool>(DEFERRED_NEW_USER_KEY)
+            .await?
+            .unwrap_or(false)
     {
         return Err(AuthError::BadRequest(
             "Please complete verification to receive a code.".to_string(),
@@ -976,7 +996,7 @@ async fn finalize_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest,
+        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest, passkey_fallback_to_otp,
         resolve_or_create_account, start_session, verify_password_handler,
     };
     use axum::{Extension, Json};
@@ -989,6 +1009,7 @@ mod tests {
         AuthEmailSender, AuthPasskeyStore, AuthUserStore, NewPasskey, StoredPasskey,
     };
     use crate::types::{AuthTosAcceptance, AuthUser, NewAuthUser};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
     /// A store holding at most one user, that records the rows it is asked to
@@ -1046,11 +1067,15 @@ mod tests {
         }
     }
 
-    struct NoMail;
+    /// Delivers nothing, but counts what it was asked to deliver — the
+    /// difference between "offered the code" and "mailed one unasked".
+    #[derive(Default)]
+    struct NoMail(Arc<std::sync::atomic::AtomicUsize>);
 
     #[async_trait::async_trait]
     impl AuthEmailSender for NoMail {
         async fn send_verification_code(&self, _: &str, _: &str, _: u32) -> AuthResult<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1080,7 +1105,14 @@ mod tests {
     }
 
     fn state(store: Arc<OneUserStore>) -> AuthState {
-        AuthState::local(store, Arc::new(NoMail), Arc::new(NoPasskeys))
+        AuthState::local(store, Arc::new(NoMail::default()), Arc::new(NoPasskeys))
+    }
+
+    /// State with a mailer, plus the counter of what it sent.
+    fn state_with_email(store: Arc<OneUserStore>) -> (AuthState, Arc<AtomicUsize>) {
+        let sender = Arc::new(NoMail::default());
+        let sent = sender.0.clone();
+        (AuthState::local(store, sender, Arc::new(NoPasskeys)), sent)
     }
 
     /// The deployment this feature exists for: an admin credential and no SMTP.
@@ -1308,6 +1340,71 @@ mod tests {
         assert!(!resp.otp_sent);
         // Says nothing about the address: the same answer for every email.
         assert!(!resp.is_new_user);
+    }
+
+    #[tokio::test]
+    async fn password_login_mails_nothing_at_session_start() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+        let (state, sent) = state_with_email(store);
+
+        let resp = start_session(
+            Extension(state),
+            Extension(closed_registration()),
+            session(),
+            Json(StartSessionRequest {
+                email: "me@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await
+        .expect("password login is configured")
+        .0;
+
+        assert!(resp.password);
+        assert!(resp.otp, "the emailed branch still exists, on request");
+        assert!(!resp.otp_sent);
+        assert_eq!(
+            sent.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "someone about to type a password must not be mailed a code"
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_code_instead_sends_it() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+        let (state, sent) = state_with_email(store);
+        let config = closed_registration();
+        // One session across both calls, as the browser has.
+        let session = session();
+
+        let offered = start_session(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+            Json(StartSessionRequest {
+                email: "me@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await
+        .expect("the password step is offered")
+        .0;
+        assert!(!offered.otp_sent);
+
+        let resp = passkey_fallback_to_otp(Extension(state), Extension(config), session)
+            .await
+            .expect("the password step's way out")
+            .0;
+
+        assert!(resp.otp_sent);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
