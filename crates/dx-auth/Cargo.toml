@@ -55,7 +55,15 @@ name = "dx-auth"
 # 0.10.4 adds `AuthUserStore::is_invited`, consulted by the registration gate on
 # both flows so an app that invites people can admit an invited address while
 # registration is otherwise closed. Default `false`; additive.
-version = "0.10.4"
+# 0.10.5 makes the dev login usable from the browser: `LoginPage` renders a
+# "Dev login (local only)" form under the normal methods, and
+# `POST /auth/dev-login` honours a form-encoded `redirect_url` (validated by the
+# same relative-path check the real login uses) instead of always landing on
+# `default_post_login_url` — so the app's OAuth flow resumes where it left off.
+# Both stay behind the existing gates: debug builds only, and `DEV_LOGIN=true`.
+# The `server` feature now also enables `dioxus/server`, which the new
+# `dev_login_available` server function needs to compile standalone.
+version = "0.10.5"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -136,6 +144,9 @@ tokio = { version = "1", features = ["macros", "rt"] }
 default = []
 server = [
     "dep:dioxus",
+    # The dev-login availability server function expands to `dioxus_server`
+    # registration under this feature, so it has to be on here too.
+    "dioxus/server",
     "dep:async-trait",
     "dep:axum",
     "dep:tower-sessions",

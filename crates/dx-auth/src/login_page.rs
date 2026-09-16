@@ -348,6 +348,42 @@ pub fn LoginPage(
         step.set(LoginStep::EmailInput);
     };
 
+    // ── Dev login (debug builds only) ───────────────────────────────
+
+    // Compiled out of release builds along with the route itself, so a
+    // production bundle neither renders this nor asks the server about it.
+    // Last hook in the component: the `?` suspends until the answer is in,
+    // which on SSR is immediate (and is what puts the form in the HTML the
+    // browser gets before hydration).
+    #[cfg(debug_assertions)]
+    let dev_login_control = {
+        let dev_login = use_server_future(dev_login_available)?;
+        let available = matches!(dev_login(), Some(Ok(true)));
+        let dev_redirect = redirect_url.clone();
+        rsx! {
+            if available {
+                div { class: "divider text-xs text-base-content/40", "Local development" }
+                // A plain form POST: it works before the bundle hydrates, and
+                // the browser sends the Origin the CSRF middleware checks.
+                form {
+                    method: "post",
+                    action: "/auth/dev-login",
+                    input { r#type: "hidden", name: "redirect_url", value: "{dev_redirect}" }
+                    button {
+                        r#type: "submit",
+                        class: "btn btn-outline btn-warning btn-sm w-full",
+                        "Dev login (local only)"
+                    }
+                }
+                p { class: "mt-2 text-center text-xs text-base-content/40",
+                    "Signs in as dev@localhost without an identity provider."
+                }
+            }
+        }
+    };
+    #[cfg(not(debug_assertions))]
+    let dev_login_control = rsx! {};
+
     // ── Render ──────────────────────────────────────────────────────
 
     let inner = rsx!(
@@ -681,6 +717,7 @@ pub fn LoginPage(
                 "Still loading — if this doesn't clear, try reloading the page."
             }
         }
+        {dev_login_control}
     };
 
     if embed {
@@ -703,6 +740,19 @@ pub fn LoginPage(
             }
         )
     }
+}
+
+// ── Dev login ───────────────────────────────────────────────────────
+
+/// Whether the login page should offer the dev-login control.
+///
+/// Mirrors the gates on `POST /auth/dev-login` (see `handlers::dev_login`):
+/// the whole thing is compiled out of release builds, and stays off in a debug
+/// build unless `DEV_LOGIN=true`.
+#[cfg(debug_assertions)]
+#[get("/api/auth/dev-login-available")]
+async fn dev_login_available() -> Result<bool, ServerFnError> {
+    Ok(std::env::var("DEV_LOGIN").as_deref() == Ok("true"))
 }
 
 // ── Login step state machine ────────────────────────────────────────

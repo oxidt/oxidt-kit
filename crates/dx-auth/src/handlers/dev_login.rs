@@ -5,6 +5,19 @@
 //! carries `id_token = "dev_mode_token"`, which [`crate::session::logout`] uses
 //! to route logout back to the dev login page.
 //!
+//! # Redirect
+//!
+//! The form-encoded body may carry a `redirect_url`, so the control on the
+//! login page can send the developer back where they were headed — the app's
+//! OAuth flow lands on `/login?redirect_url=/oauth/authorize/resume` and has to
+//! resume there. It is validated with the same `is_safe_redirect_url` check the
+//! real login uses (relative paths only), and anything else falls back to
+//! `AuthConfig::default_post_login_url`.
+//!
+//! The button is a plain HTML form POST, which browsers send with an `Origin`
+//! (and `Referer`) header, so it satisfies [`crate::csrf::csrf_origin_check`]
+//! like every other POST on these routes — no separate token, no exemption.
+//!
 //! # Production safety
 //!
 //! This is guarded by two independent gates, either of which is sufficient:
@@ -15,6 +28,8 @@
 //!    `DEV_LOGIN=true` is set in the environment.
 
 use axum::Extension;
+use axum::Form;
+use axum::extract::rejection::FormRejection;
 use axum::response::{IntoResponse, Redirect, Response};
 
 use super::{AuthUserInfo, lookup_or_create_user};
@@ -28,6 +43,14 @@ const DEV_SUB: &str = "dev-mode-user";
 const DEV_EMAIL: &str = "dev@localhost";
 const DEV_USERNAME: &str = "dev";
 
+/// Body of the login page's dev-login form.
+#[derive(serde::Deserialize)]
+pub struct DevLoginForm {
+    /// Where to continue after signing in. Honoured only if relative.
+    #[serde(default)]
+    redirect_url: Option<String>,
+}
+
 /// `POST /auth/dev-login` — sign in as the local dev user, bypassing FerrisKey.
 ///
 /// Only present in debug builds, and only active when `DEV_LOGIN=true`.
@@ -35,6 +58,9 @@ pub async fn dev_login_handler(
     Extension(auth_config): Extension<AuthConfig>,
     Extension(auth_state): Extension<AuthState>,
     session: tower_sessions::Session,
+    // A rejection (no body at all, as a bare `curl -X POST` sends) is not an
+    // error here — it just means no redirect was asked for.
+    form: Result<Form<DevLoginForm>, FormRejection>,
 ) -> AuthResult<Response> {
     if std::env::var("DEV_LOGIN").as_deref() != Ok("true") {
         return Err(AuthError::Unauthorized("Dev login is disabled".to_string()));
@@ -65,7 +91,13 @@ pub async fn dev_login_handler(
     };
     login(&session, &data).await?;
 
+    let redirect = form
+        .ok()
+        .and_then(|Form(body)| body.redirect_url)
+        .filter(|url| super::shared::is_safe_redirect_url(url))
+        .unwrap_or_else(|| auth_config.default_post_login_url.clone());
+
     tracing::warn!("Dev login used — signed in as {DEV_EMAIL}");
 
-    Ok(Redirect::to(&auth_config.default_post_login_url).into_response())
+    Ok(Redirect::to(&redirect).into_response())
 }
