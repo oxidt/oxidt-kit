@@ -16,11 +16,16 @@ are tagged `oxidt-*-v*`.
 | [`oxidt-umami`](crates/oxidt-umami) | self-hosted Umami analytics — same-origin tracker proxy (ad-blocker bypass, forwards `X-Forwarded-For` so countries survive), client event bridge with numeric revenue props, session identify, script mount |
 | [`oxidt-s3`](crates/oxidt-s3) | S3-compatible object storage with its own SigV4 signer over the kit's reqwest stack — put/get/head/list/copy/delete, presigned GET/PUT, retry, errors by cause; no SDK |
 | [`oxidt-monitor`](crates/oxidt-monitor) | the surface the central project board polls — `GET /health` liveness and bearer-guarded `GET /api/admin/metrics` KPIs, over an app-supplied source trait |
+| [`oxidt-billing`](crates/oxidt-billing) | provider-neutral subscription state, a small plan catalog and access/seat rules — Serde only, usable on the server and in WASM |
+| [`oxidt-stripe`](crates/oxidt-stripe) | Stripe Checkout, Billing Portal and signed-webhook client — provider HTTP and response types, no SQL or sessions |
+| [`oxidt-polar`](crates/oxidt-polar) | Polar API client and standard-webhooks verification, keyed by your own customer UUID |
 
 All are storage-agnostic: no database dependency, no ORM types in any public
 signature. `oxidt-auth` reaches storage through the `AuthUserStore`,
 `AuthEmailSender` and `AuthRateLimitStore` traits, which the host app
-implements. Planned: billing.
+implements. `oxidt-billing` is the provider-neutral core; `oxidt-stripe` and
+`oxidt-polar` are the provider clients and depend on neither the app nor each
+other.
 
 ## Using it
 
@@ -34,6 +39,9 @@ oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-au
 oxidt-umami  = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-umami-v0.1.0" }
 oxidt-s3     = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-s3-v0.1.0" }
 oxidt-monitor = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-monitor-v0.1.0" }
+oxidt-billing = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-billing-v0.1.0" }
+oxidt-stripe = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-stripe-v0.1.0" }
+oxidt-polar = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-polar-v0.1.0" }
 ```
 
 `oxidt-auth` has no default features. Enable `server`, `web`, or both — apps
