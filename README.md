@@ -11,6 +11,7 @@ own copy, so a fix lands once instead of once per app.
 | [`dx-auth`](crates/dx-auth) | FerrisKey OIDC, custom login UI (passkey / password / email-OTP), sessions, CSRF, rate limiting, and an optional self-owned WebAuthn Relying Party |
 | [`dx-umami`](crates/dx-umami) | self-hosted Umami analytics — same-origin tracker proxy (ad-blocker bypass, forwards `X-Forwarded-For` so countries survive), client event bridge with numeric revenue props, session identify, script mount |
 | [`dx-s3`](crates/dx-s3) | S3-compatible object storage with its own SigV4 signer over the kit's reqwest stack — put/get/head/list/copy/delete, presigned GET/PUT, retry, errors by cause; no SDK |
+| [`dx-monitor`](crates/dx-monitor) | the surface the central project board polls — `GET /health` liveness and bearer-guarded `GET /api/admin/metrics` KPIs, over an app-supplied source trait |
 
 All are storage-agnostic: no database dependency, no ORM types in any public
 signature. `dx-auth` reaches storage through the `AuthUserStore`,
@@ -28,6 +29,7 @@ dx-smtp   = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-smtp-v0.1.0
 dx-auth   = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-auth-v0.4.1" }
 dx-umami  = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-umami-v0.1.0" }
 dx-s3     = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-s3-v0.1.0" }
+dx-monitor = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-monitor-v0.1.0" }
 ```
 
 `dx-auth` has no default features. Enable `server`, `web`, or both — apps
@@ -212,6 +214,36 @@ gaiasana (`rust-s3`, never wired up). None was extracted as-is.
   filenames broke signing in two apps.
 - **`exists` returns `Result<bool>`**, never a silent `false` on a network
   error — stepshots guarded a never-overwrite-the-original path on that.
+
+### dx-monitor
+
+Two copies, stepshots and infrapage, same 113/127-line file under the same name
+(`server/admin_metrics.rs`) and already 102 lines apart. Both serve the same two
+endpoints to the same board, so the drift was pure liability.
+
+- **The paths are constants, not parameters.** `/health` and
+  `/api/admin/metrics` are what the board polls across every project; an app
+  free to choose its own path is an app that silently falls off the board.
+  `health_response` and `metrics_response` are public for the app that
+  genuinely must mount elsewhere.
+- **No database, and no feature flag that would add one.** stepshots is on
+  Postgres and infrapage's checks straddle Postgres and a cache, so both the
+  probe list and the KPI list come from the app through `MonitorSource`. The
+  crate never learns which engine is behind `"db"` — which is the point, since
+  that key survived infrapage's Mongo→Postgres move unchanged.
+- **`kpis()` is infallible.** Both copies degraded a failing count to `0`
+  rather than 500 the whole response, so the board keeps its columns when one
+  query breaks. The trait keeps that: absorb errors app-side.
+- **No token means 404, not 401.** Taken from both copies — an endpoint that is
+  switched off should not advertise that it exists.
+- **Token comparison now hashes first.** Both copies hand-rolled a `ct_eq` that
+  returned early on a length mismatch, which leaks the expected token's length
+  despite the comment saying otherwise. `MonitorToken` compares two SHA-256
+  digests under `subtle`, so the compare is fixed-width. Adopters lose nothing:
+  the accepted token is unchanged.
+- **`delta_24h` is omitted, never null.** The board tells "this KPI has no
+  delta" from "the delta is zero", and both copies already relied on the key
+  being absent.
 
 ## Coming from your own copy?
 

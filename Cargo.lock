@@ -228,6 +228,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-extra"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9963ff19f40c6102c76756ef0a46004c0d58957d87259fc9208ff8441c12ab96"
+dependencies = [
+ "axum",
+ "axum-core",
+ "bytes",
+ "futures-util",
+ "headers",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "rustversion",
+ "serde_core",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "axum-macros"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -267,6 +290,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "blake2"
@@ -752,12 +778,15 @@ dependencies = [
  "dioxus-devtools",
  "dioxus-document",
  "dioxus-fullstack",
+ "dioxus-fullstack-macro",
  "dioxus-history",
  "dioxus-hooks",
  "dioxus-html",
+ "dioxus-liveview",
  "dioxus-logger",
  "dioxus-server",
  "dioxus-signals",
+ "dioxus-ssr",
  "dioxus-stores",
  "dioxus-web",
  "manganis",
@@ -911,6 +940,7 @@ dependencies = [
  "async-tungstenite",
  "axum",
  "axum-core",
+ "axum-extra",
  "base64 0.22.1",
  "bytes",
  "ciborium",
@@ -935,6 +965,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "inventory",
  "js-sys",
  "mime",
  "pin-project",
@@ -946,7 +977,13 @@ dependencies = [
  "serde_qs",
  "serde_urlencoded",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.28.0",
  "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-layer",
  "tracing",
  "tungstenite 0.27.0",
  "url",
@@ -1045,6 +1082,9 @@ dependencies = [
  "keyboard-types",
  "lazy-js-bundle",
  "rustversion",
+ "serde",
+ "serde_json",
+ "serde_repr",
  "tracing",
 ]
 
@@ -1066,6 +1106,9 @@ version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faa22cc3431e7efdbae28069542a1763c977d5edbe4d4fbfb0b7667b9c9966e9"
 dependencies = [
+ "dioxus-core",
+ "dioxus-core-types",
+ "dioxus-html",
  "js-sys",
  "lazy-js-bundle",
  "rustc-hash 2.1.3",
@@ -1074,6 +1117,34 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "dioxus-liveview"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b9cfecfc0037cb85b649739acc49a09dd303d1fa1daa7af609f5796b491b71c"
+dependencies = [
+ "axum",
+ "dioxus-cli-config",
+ "dioxus-core",
+ "dioxus-devtools",
+ "dioxus-document",
+ "dioxus-history",
+ "dioxus-html",
+ "dioxus-interpreter-js",
+ "futures-channel",
+ "futures-util",
+ "generational-box",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "slab",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1309,7 +1380,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dx-auth"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -1349,6 +1420,21 @@ dependencies = [
  "rand 0.9.5",
  "sha2",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "dx-monitor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1466,6 +1552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2263,6 +2350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
 dependencies = [
  "bitflags",
+ "serde",
 ]
 
 [[package]]
@@ -3439,6 +3527,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_repr"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3841,6 +3940,18 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

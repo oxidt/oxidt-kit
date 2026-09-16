@@ -1,0 +1,36 @@
+[package]
+name = "dx-monitor"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The monitoring surface every dx SaaS app presents to the central project board: a liveness probe and bearer-guarded business KPIs, over an app-supplied source trait"
+
+[dependencies]
+# Wire format. `Serialize` for the KPI shape, `json!` for the envelopes.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# `generated_at` only. No parsing, no timezone database — "clock" is the system
+# clock and nothing more.
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "std",
+] }
+
+# Token comparison. Digest first, then a constant-time compare of two fixed-
+# width hashes, so neither the length nor a shared prefix of the expected token
+# is observable through timing.
+sha2 = "0.10"
+subtle = "2.6"
+
+# The crate is server-only: there is no client half to target-gate, so apps
+# gate it at the dependency (`dx-monitor = { ..., optional = true }` under
+# their own `server` feature) the way they already gate axum and sqlx.
+axum = "0.8.8"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }
