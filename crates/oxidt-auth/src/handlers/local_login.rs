@@ -383,8 +383,12 @@ pub async fn start_session(
     Extension(auth_state): Extension<AuthState>,
     Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
+    headers: axum::http::HeaderMap,
     Json(req): Json<StartSessionRequest>,
 ) -> AuthResult<Json<StartSessionResponse>> {
+    session
+        .insert("locale", crate::locale::Locale::from_headers(&headers))
+        .await?;
     let email = req.email.trim().to_lowercase();
 
     if !shared::is_valid_email(&email) {
@@ -1302,6 +1306,7 @@ mod tests {
             Extension(state_without_email(store)),
             Extension(AuthConfig::default()),
             session(),
+            axum::http::HeaderMap::new(),
             Json(StartSessionRequest {
                 email: "me@example.com".to_string(),
                 redirect_url: None,
@@ -1326,6 +1331,7 @@ mod tests {
             Extension(state_without_email(store)),
             Extension(closed_registration()),
             session(),
+            axum::http::HeaderMap::new(),
             Json(StartSessionRequest {
                 email: "me@example.com".to_string(),
                 redirect_url: None,
@@ -1354,6 +1360,7 @@ mod tests {
             Extension(state),
             Extension(closed_registration()),
             session(),
+            axum::http::HeaderMap::new(),
             Json(StartSessionRequest {
                 email: "me@example.com".to_string(),
                 redirect_url: None,
@@ -1388,6 +1395,7 @@ mod tests {
             Extension(state.clone()),
             Extension(config.clone()),
             session.clone(),
+            axum::http::HeaderMap::new(),
             Json(StartSessionRequest {
                 email: "me@example.com".to_string(),
                 redirect_url: None,

@@ -174,6 +174,18 @@ pub trait AuthEmailSender: Send + Sync + 'static {
         code: &str,
         expires_in_minutes: u32,
     ) -> AuthResult<()>;
+
+    /// Backwards-compatible localized delivery hook.
+    async fn send_verification_code_localized(
+        &self,
+        to_email: &str,
+        code: &str,
+        expires_in_minutes: u32,
+        _locale: crate::locale::Locale,
+    ) -> AuthResult<()> {
+        self.send_verification_code(to_email, code, expires_in_minutes)
+            .await
+    }
 }
 
 /// Backs auth rate limiting with shared storage so the quota holds across

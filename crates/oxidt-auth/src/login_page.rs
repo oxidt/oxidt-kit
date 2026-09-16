@@ -402,7 +402,7 @@ pub fn LoginPage(
                                     d: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
                                 }
                             }
-                            span { "{msg}" }
+                            span { {crate::locale::tr(&msg)} }
                         }
                     }
 
@@ -421,7 +421,7 @@ pub fn LoginPage(
                                     d: "M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z",
                                 }
                             }
-                            span { "{err}" }
+                            span { {crate::locale::tr(&err)} }
                         }
                     }
 
@@ -433,7 +433,7 @@ pub fn LoginPage(
                                 class: "space-y-4",
                                 fieldset {
                                     class: "fieldset",
-                                    label { class: "fieldset-label", "Email address" }
+                                    label { class: "fieldset-label", {crate::locale::tr("Email address")} }
                                     input {
                                         r#type: "email",
                                         class: "input input-bordered w-full",
@@ -471,10 +471,10 @@ pub fn LoginPage(
                                     if is_loading() {
                                         span { class: "loading loading-spinner loading-sm" }
                                     }
-                                    "Continue"
+                                    {crate::locale::tr("Continue")}
                                 }
                                 p { class: "text-xs text-base-content/40 text-center mt-3",
-                                    "No account yet? We'll create one for you."
+                                    {crate::locale::tr("No account yet? We'll create one for you.")}
                                 }
                             }
                         ),
@@ -482,16 +482,16 @@ pub fn LoginPage(
                         LoginStep::Detecting => rsx!(
                             div { class: "text-center space-y-4 py-4",
                                 span { class: "loading loading-spinner loading-lg text-primary" }
-                                p { class: "text-base-content/70", "Setting things up..." }
+                                p { class: "text-base-content/70", {crate::locale::tr("Setting things up...")} }
                             }
                         ),
 
                         LoginStep::PasskeyChallenge => rsx!(
                             div { class: "text-center space-y-4 py-4",
                                 span { class: "loading loading-spinner loading-lg text-primary" }
-                                p { class: "font-medium", "Waiting for authentication..." }
+                                p { class: "font-medium", {crate::locale::tr("Waiting for authentication...")} }
                                 p { class: "text-sm text-base-content/50",
-                                    "Follow the prompt from your browser or device."
+                                    {crate::locale::tr("Follow the prompt from your browser or device.")}
                                 }
                             }
                         ),
@@ -500,7 +500,7 @@ pub fn LoginPage(
                             div { class: "space-y-4",
                                 div { class: "text-center",
                                     p { class: "text-sm text-base-content/70",
-                                        "Enter your password for"
+                                        {crate::locale::tr("Enter your password for")}
                                     }
                                     p { class: "font-medium text-sm", "{email}" }
                                 }
@@ -510,11 +510,11 @@ pub fn LoginPage(
                                     class: "space-y-4",
                                     fieldset {
                                         class: "fieldset",
-                                        label { class: "fieldset-label", "Password" }
+                                        label { class: "fieldset-label", {crate::locale::tr("Password")} }
                                         input {
                                             r#type: "password",
                                             class: "input input-bordered w-full",
-                                            placeholder: "Enter your password",
+                                            placeholder: crate::locale::tr("Enter your password"),
                                             autofocus: true,
                                             autocomplete: "current-password",
                                             value: "{password}",
@@ -528,7 +528,7 @@ pub fn LoginPage(
                                         if is_loading() {
                                             span { class: "loading loading-spinner loading-sm" }
                                         }
-                                        "Sign in"
+                                        {crate::locale::tr("Sign in")}
                                     }
                                 }
 
@@ -536,7 +536,7 @@ pub fn LoginPage(
                                     button {
                                         class: "btn btn-ghost btn-sm text-base-content/50",
                                         onclick: on_back,
-                                        "Back"
+                                        {crate::locale::tr("Back")}
                                     }
                                 }
                             }
@@ -547,11 +547,11 @@ pub fn LoginPage(
                                 div { class: "text-center",
                                     if is_new_user() {
                                         div { class: "badge badge-success badge-outline mb-2",
-                                            "Account created"
+                                            {crate::locale::tr("Account created")}
                                         }
                                     }
                                     p { class: "text-sm text-base-content/70",
-                                        "We sent a verification code to"
+                                        {crate::locale::tr("We sent a verification code to")}
                                     }
                                     p { class: "font-medium text-sm", "{email}" }
                                 }
@@ -561,7 +561,7 @@ pub fn LoginPage(
                                     class: "space-y-4",
                                     fieldset {
                                         class: "fieldset",
-                                        label { class: "fieldset-label", "Verification code" }
+                                        label { class: "fieldset-label", {crate::locale::tr("Verification code")} }
                                         input {
                                             r#type: "text",
                                             class: "input input-bordered w-full text-center text-xl tracking-widest",
@@ -581,7 +581,7 @@ pub fn LoginPage(
                                         if is_loading() {
                                             span { class: "loading loading-spinner loading-sm" }
                                         }
-                                        "Verify"
+                                        {crate::locale::tr("Verify")}
                                     }
                                 }
 
@@ -589,7 +589,7 @@ pub fn LoginPage(
                                     button {
                                         class: "btn btn-ghost btn-sm text-base-content/50",
                                         onclick: on_back,
-                                        "Back"
+                                        {crate::locale::tr("Back")}
                                     }
                                     div { class: "flex gap-1",
                                         if has_password() {
@@ -597,14 +597,14 @@ pub fn LoginPage(
                                                 class: "btn btn-ghost btn-sm text-primary",
                                                 onclick: on_use_password,
                                                 disabled: is_loading(),
-                                                "Use password"
+                                                {crate::locale::tr("Use password")}
                                             }
                                         }
                                         button {
                                             class: "btn btn-ghost btn-sm text-primary",
                                             onclick: on_resend_otp,
                                             disabled: is_loading(),
-                                            "Resend code"
+                                            {crate::locale::tr("Resend code")}
                                         }
                                     }
                                 }
@@ -614,9 +614,9 @@ pub fn LoginPage(
                         LoginStep::TosAcceptance => rsx!(
                             div { class: "space-y-4",
                                 div { class: "text-center",
-                                    h2 { class: "text-lg font-semibold", "Almost there!" }
+                                    h2 { class: "text-lg font-semibold", {crate::locale::tr("Almost there!")} }
                                     p { class: "text-sm text-base-content/70 mt-1",
-                                        "Please review and accept our terms to continue."
+                                        {crate::locale::tr("Please review and accept our terms to continue.")}
                                     }
                                 }
                                 label { class: "label cursor-pointer justify-start gap-3",
@@ -629,19 +629,19 @@ pub fn LoginPage(
                                         },
                                     }
                                     span { class: "label-text",
-                                        "I agree to the "
+                                        {crate::locale::tr("I agree to the ")}
                                         a {
                                             href: "/legal/terms",
                                             target: "_blank",
                                             class: "link link-primary",
-                                            "Terms of Service"
+                                            {crate::locale::tr("Terms of Service")}
                                         }
-                                        " and "
+                                        {crate::locale::tr(" and ")}
                                         a {
                                             href: "/legal/privacy",
                                             target: "_blank",
                                             class: "link link-primary",
-                                            "Privacy Policy"
+                                            {crate::locale::tr("Privacy Policy")}
                                         }
                                     }
                                 }
@@ -652,7 +652,7 @@ pub fn LoginPage(
                                     if is_loading() {
                                         span { class: "loading loading-spinner loading-sm" }
                                     }
-                                    "Continue"
+                                    {crate::locale::tr("Continue")}
                                 }
                             }
                         ),
@@ -660,7 +660,7 @@ pub fn LoginPage(
                         LoginStep::Verifying => rsx!(
                             div { class: "text-center space-y-4 py-4",
                                 span { class: "loading loading-spinner loading-lg text-primary" }
-                                p { class: "text-base-content/70", "Verifying..." }
+                                p { class: "text-base-content/70", {crate::locale::tr("Verifying...")} }
                             }
                         ),
 
@@ -681,8 +681,8 @@ pub fn LoginPage(
                                         }
                                     }
                                 }
-                                p { class: "font-medium", "Login successful!" }
-                                p { class: "text-sm text-base-content/50", "Redirecting..." }
+                                p { class: "font-medium", {crate::locale::tr("Login successful!")} }
+                                p { class: "text-sm text-base-content/50", {crate::locale::tr("Redirecting...")} }
                                 span { class: "loading loading-spinner loading-sm" }
                             }
                         ),
@@ -707,14 +707,14 @@ pub fn LoginPage(
                 class: "flex items-center justify-center gap-2 mt-4 text-xs text-base-content/50",
                 "aria-live": "polite",
                 span { class: "loading loading-spinner loading-xs" }
-                "Starting up…"
+                {crate::locale::tr("Starting up…")}
             }
             // If the bundle never arrives there is no Rust running to notice,
             // so this is revealed by a CSS delay rather than a timer (see
             // `.hydration-stall`). Hydration removes the whole block first on
             // any healthy load.
             div { class: "hydration-stall text-center text-xs text-warning mt-2",
-                "Still loading — if this doesn't clear, try reloading the page."
+                {crate::locale::tr("Still loading — if this doesn't clear, try reloading the page.")}
             }
         }
         {dev_login_control}
@@ -729,9 +729,9 @@ pub fn LoginPage(
                     div { class: "card-body",
                         // Logo / header
                         div { class: "text-center mb-6",
-                            h1 { class: "text-2xl font-bold", "Welcome" }
+                            h1 { class: "text-2xl font-bold", {crate::locale::tr("Welcome")} }
                             p { class: "text-sm text-base-content/60 mt-1",
-                                "Sign in or create an account"
+                                {crate::locale::tr("Sign in or create an account")}
                             }
                         }
                         {inner}

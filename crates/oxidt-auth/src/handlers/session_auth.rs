@@ -308,9 +308,13 @@ pub async fn start_session(
     Extension(auth_state): Extension<AuthState>,
     Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
+    headers: axum::http::HeaderMap,
     Json(req): Json<StartSessionRequest>,
 ) -> AuthResult<Json<StartSessionResponse>> {
     let fk = FkConfig::from(&auth_config)?;
+    session
+        .insert("locale", crate::locale::Locale::from_headers(&headers))
+        .await?;
     let email = req.email.trim().to_lowercase();
 
     info!("start_session: email={}", email);

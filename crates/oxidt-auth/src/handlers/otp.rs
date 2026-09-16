@@ -174,8 +174,12 @@ pub(super) async fn generate_and_send_otp(
     session.insert(CUSTOM_OTP_PURPOSE_KEY, purpose).await?;
     session.insert(CUSTOM_OTP_ATTEMPTS_KEY, 0u32).await?;
 
+    let locale = session
+        .get::<crate::locale::Locale>("locale")
+        .await?
+        .unwrap_or_default();
     email_sender
-        .send_verification_code(email, &code, 10)
+        .send_verification_code_localized(email, &code, 10, locale)
         .await
         .map_err(|e| {
             AuthError::ServerStateError(format!("Failed to send verification email: {}", e))

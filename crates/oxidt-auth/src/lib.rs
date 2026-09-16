@@ -98,3 +98,5 @@ mod local_login_page;
 
 #[cfg(any(feature = "web", feature = "local-login"))]
 pub use local_login_page::LocalLoginPage;
+
+pub mod locale;
