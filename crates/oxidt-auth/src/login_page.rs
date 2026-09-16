@@ -1,0 +1,1111 @@
+use crate::types::UserDataRefreshTrigger;
+use dioxus::prelude::*;
+
+/// Multi-step login page: OTP-first with auto-passkey detection.
+///
+/// Flow: Email → Detecting → (PasskeyChallenge | OtpCodeInput) → Verifying → TOS? → Success
+// Several signals are only written from `web`-gated code; on a server-only
+// build they read as needlessly mutable.
+#[cfg_attr(not(feature = "web"), allow(unused_mut, unused_variables))]
+#[component]
+pub fn LoginPage(
+    redirect_url: String,
+    #[props(default)] on_success: EventHandler<String>,
+    /// Fired alongside `on_success` when the completed flow created a new
+    /// account (registration) rather than signing in an existing user — e.g.
+    /// for a `signup` analytics event.
+    #[props(default)]
+    on_signup: EventHandler<()>,
+    /// When true, renders only the form content without the full-page wrapper,
+    /// card, and built-in header. Use this to embed the login form into a
+    /// custom-styled container.
+    #[props(default = false)]
+    embed: bool,
+    /// Bollwark captcha widget: `(server_url, site_key)`. When set, new-user
+    /// registration is gated by the widget pre-solving invisibly inside the
+    /// email form. Pass the same values the server reads from `CAPTCHA_URL` /
+    /// `CAPTCHA_SITE_KEY`; both are public by design. Leave unset only where
+    /// the registration allowlist is gate enough (internal deployments) — the
+    /// server must be unconfigured too, or it will ask for a widget this page
+    /// cannot mount.
+    #[props(default)]
+    captcha_config: Option<(String, String)>,
+) -> Element {
+    // Check if we arrived needing TOS acceptance
+    let initial_step = if redirect_url.contains("accept_tos=true") {
+        LoginStep::TosAcceptance
+    } else {
+        LoginStep::EmailInput
+    };
+
+    // Login state machine
+    let mut step = use_signal(move || initial_step.clone());
+    let mut email = use_signal(String::new);
+    let mut otp_code = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut error_msg = use_signal(|| None::<String>);
+    let mut success_msg = use_signal(|| None::<String>);
+    let mut is_loading = use_signal(|| false);
+    let is_new_user = use_signal(|| false);
+    let has_password = use_signal(|| false);
+    let mut tos_accepted = use_signal(|| false);
+
+    // Whether the WASM bundle has hydrated the page yet. SSR paints this form
+    // fully styled well before the bundle lands, so without this the controls
+    // look live while every handler is still unattached.
+    let hydrated = crate::use_hydrated();
+
+    // Store passkey options for the WebAuthn browser API
+    let passkey_options = use_signal(|| None::<String>);
+
+    // Pre-solve the bollwark widget invisibly while the user is on the
+    // email-entry step. The widget is mounted inside the email <form> (see the
+    // EmailInput render branch) so it captures real interaction and writes its
+    // token into a hidden `captcha-token` input by the time the user submits.
+    // Script tag and `data-sitekey` container can land in either order, so
+    // poll briefly for both, then ask the (idempotent) autoInit.
+    #[cfg(feature = "web")]
+    let has_captcha_widget = captcha_config.is_some();
+    #[cfg(feature = "web")]
+    use_effect(use_reactive!(|step| {
+        if !matches!(step(), LoginStep::EmailInput) || !has_captcha_widget {
+            return;
+        }
+        let _ = js_sys::eval(
+            r#"(function() {
+                let tries = 0;
+                const id = setInterval(() => {
+                    tries++;
+                    const hasRuntime = window.Bollwark && window.Bollwark.scan;
+                    const hasContainer = document.querySelector('#bollwark-container[data-sitekey]');
+                    if (hasRuntime && hasContainer) {
+                        window.Bollwark.scan();
+                        clearInterval(id);
+                    } else if (tries > 100) {
+                        clearInterval(id);
+                        console.warn('[oxidt-auth] captcha widget failed to mount within 5s');
+                    }
+                }, 50);
+            })();"#,
+        );
+    }));
+
+    // Trigger for App to re-fetch user data after login (avoids full page reload)
+    let mut user_refresh: Signal<UserDataRefreshTrigger> = use_context();
+
+    // Fire on_success callback immediately when step transitions to Success.
+    // This lets the parent component navigate without waiting for the
+    // resource chain (trigger → server fetch → auth state update → effect).
+    use_effect(move || {
+        if let LoginStep::Success { redirect_url } = step() {
+            // peek: is_new_user is settled before Success and must not
+            // re-trigger this effect.
+            if *is_new_user.peek() {
+                on_signup.call(());
+            }
+            on_success.call(redirect_url);
+        }
+    });
+
+    // ── Handlers ────────────────────────────────────────────────────
+
+    // Submit email → go to Detecting step, POST to /auth/session/start
+    let redirect_url_clone = redirect_url.clone();
+    let on_email_submit = move |evt: FormEvent| {
+        evt.prevent_default();
+        let email_val = email().trim().to_lowercase();
+        if email_val.is_empty() || !email_val.contains('@') {
+            error_msg.set(Some("Please enter a valid email address.".to_string()));
+            success_msg.set(None);
+            return;
+        }
+        error_msg.set(None);
+        success_msg.set(None);
+        step.set(LoginStep::Detecting);
+
+        #[cfg(feature = "web")]
+        start_session_flow(
+            email_val,
+            redirect_url_clone.clone(),
+            step,
+            error_msg,
+            is_new_user,
+            has_password,
+            is_loading,
+            passkey_options,
+            has_captcha_widget,
+            user_refresh,
+        );
+    };
+
+    // Verify OTP code
+    let on_otp_verify = move |evt: FormEvent| {
+        evt.prevent_default();
+        spawn(async move {
+            let code = otp_code().trim().to_string();
+            if code.is_empty() {
+                error_msg.set(Some("Please enter the verification code.".to_string()));
+                success_msg.set(None);
+                return;
+            }
+            is_loading.set(true);
+            error_msg.set(None);
+            success_msg.set(None);
+            step.set(LoginStep::Verifying);
+
+            #[cfg(feature = "web")]
+            {
+                let result: std::result::Result<VerifyResp, String> = wasm_post_json(
+                    "/auth/session/otp/verify",
+                    Some(serde_json::json!({ "code": code })),
+                )
+                .await;
+                match result {
+                    Ok(resp) => {
+                        if resp.success {
+                            if resp.needs_tos_acceptance == Some(true) {
+                                step.set(LoginStep::TosAcceptance);
+                                is_loading.set(false);
+                            } else if let Some(url) = resp.redirect_url {
+                                step.set(LoginStep::Success {
+                                    redirect_url: url.clone(),
+                                });
+                                user_refresh.write().0 += 1;
+                            }
+                        } else {
+                            let msg = resp
+                                .error
+                                .unwrap_or_else(|| "Verification failed".to_string());
+                            error_msg.set(Some(msg));
+                            step.set(LoginStep::OtpCodeInput);
+                            is_loading.set(false);
+                        }
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                        step.set(LoginStep::OtpCodeInput);
+                        is_loading.set(false);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "web"))]
+            {
+                is_loading.set(false);
+            }
+        });
+    };
+
+    // Resend OTP
+    let on_resend_otp = move |_| {
+        spawn(async move {
+            is_loading.set(true);
+            error_msg.set(None);
+            success_msg.set(None);
+
+            #[cfg(feature = "web")]
+            {
+                let result: std::result::Result<VerifyResp, String> =
+                    wasm_post_json("/auth/session/otp/resend", None).await;
+                match result {
+                    Ok(resp) => {
+                        if resp.success {
+                            success_msg
+                                .set(Some("A new code has been sent to your email.".to_string()));
+                        } else {
+                            let msg = resp
+                                .error
+                                .unwrap_or_else(|| "Failed to resend code".to_string());
+                            error_msg.set(Some(msg));
+                        }
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                    }
+                }
+                is_loading.set(false);
+            }
+
+            #[cfg(not(feature = "web"))]
+            {
+                is_loading.set(false);
+            }
+        });
+    };
+
+    // Verify password
+    let on_password_verify = move |evt: FormEvent| {
+        evt.prevent_default();
+        spawn(async move {
+            let pw = password().trim().to_string();
+            if pw.is_empty() {
+                error_msg.set(Some("Please enter your password.".to_string()));
+                success_msg.set(None);
+                return;
+            }
+            is_loading.set(true);
+            error_msg.set(None);
+            success_msg.set(None);
+            step.set(LoginStep::Verifying);
+
+            #[cfg(feature = "web")]
+            {
+                let result: std::result::Result<VerifyResp, String> = wasm_post_json(
+                    "/auth/session/password/verify",
+                    Some(serde_json::json!({ "password": pw })),
+                )
+                .await;
+                match result {
+                    Ok(resp) => {
+                        if resp.success {
+                            if resp.needs_tos_acceptance == Some(true) {
+                                step.set(LoginStep::TosAcceptance);
+                                is_loading.set(false);
+                            } else if let Some(url) = resp.redirect_url {
+                                step.set(LoginStep::Success {
+                                    redirect_url: url.clone(),
+                                });
+                                user_refresh.write().0 += 1;
+                            }
+                        } else {
+                            let msg = resp
+                                .error
+                                .unwrap_or_else(|| "Password verification failed".to_string());
+                            error_msg.set(Some(msg));
+                            step.set(LoginStep::PasswordInput);
+                            is_loading.set(false);
+                        }
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                        step.set(LoginStep::PasswordInput);
+                        is_loading.set(false);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "web"))]
+            {
+                is_loading.set(false);
+            }
+        });
+    };
+
+    // Switch from OTP to password input
+    let on_use_password = move |_| {
+        error_msg.set(None);
+        success_msg.set(None);
+        password.set(String::new());
+        step.set(LoginStep::PasswordInput);
+    };
+
+    // Accept TOS and continue to dashboard
+    let on_tos_accept = move |_| {
+        spawn(async move {
+            is_loading.set(true);
+            error_msg.set(None);
+
+            #[cfg(feature = "web")]
+            {
+                let result: std::result::Result<VerifyResp, String> =
+                    wasm_post_json("/auth/session/accept-tos", None).await;
+                match result {
+                    Ok(resp) => {
+                        if resp.success {
+                            if let Some(url) = resp.redirect_url {
+                                step.set(LoginStep::Success {
+                                    redirect_url: url.clone(),
+                                });
+                                user_refresh.write().0 += 1;
+                            }
+                        } else {
+                            let msg = resp
+                                .error
+                                .unwrap_or_else(|| "Failed to accept terms".to_string());
+                            error_msg.set(Some(msg));
+                            is_loading.set(false);
+                        }
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                        is_loading.set(false);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "web"))]
+            {
+                is_loading.set(false);
+            }
+        });
+    };
+
+    let on_back = move |_| {
+        error_msg.set(None);
+        success_msg.set(None);
+        otp_code.set(String::new());
+        password.set(String::new());
+        step.set(LoginStep::EmailInput);
+    };
+
+    // ── Dev login (debug builds only) ───────────────────────────────
+
+    // Compiled out of release builds along with the route itself, so a
+    // production bundle neither renders this nor asks the server about it.
+    // Last hook in the component: the `?` suspends until the answer is in,
+    // which on SSR is immediate (and is what puts the form in the HTML the
+    // browser gets before hydration).
+    #[cfg(debug_assertions)]
+    let dev_login_control = {
+        let dev_login = use_server_future(dev_login_available)?;
+        let available = matches!(dev_login(), Some(Ok(true)));
+        let dev_redirect = redirect_url.clone();
+        rsx! {
+            if available {
+                div { class: "divider text-xs text-base-content/40", "Local development" }
+                // A plain form POST: it works before the bundle hydrates, and
+                // the browser sends the Origin the CSRF middleware checks.
+                form {
+                    method: "post",
+                    action: "/auth/dev-login",
+                    input { r#type: "hidden", name: "redirect_url", value: "{dev_redirect}" }
+                    button {
+                        r#type: "submit",
+                        class: "btn btn-outline btn-warning btn-sm w-full",
+                        "Dev login (local only)"
+                    }
+                }
+                p { class: "mt-2 text-center text-xs text-base-content/40",
+                    "Signs in as dev@localhost without an identity provider."
+                }
+            }
+        }
+    };
+    #[cfg(not(debug_assertions))]
+    let dev_login_control = rsx! {};
+
+    // ── Render ──────────────────────────────────────────────────────
+
+    let inner = rsx!(
+                    // Success display
+                    if let Some(msg) = success_msg() {
+                        div { class: "alert alert-success mb-4",
+                            svg {
+                                xmlns: "http://www.w3.org/2000/svg",
+                                class: "stroke-current shrink-0 h-5 w-5",
+                                fill: "none",
+                                "viewBox": "0 0 24 24",
+                                path {
+                                    "stroke-linecap": "round",
+                                    "stroke-linejoin": "round",
+                                    "stroke-width": "2",
+                                    d: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                                }
+                            }
+                            span { "{msg}" }
+                        }
+                    }
+
+                    // Error display
+                    if let Some(err) = error_msg() {
+                        div { class: "alert alert-error mb-4",
+                            svg {
+                                xmlns: "http://www.w3.org/2000/svg",
+                                class: "stroke-current shrink-0 h-5 w-5",
+                                fill: "none",
+                                "viewBox": "0 0 24 24",
+                                path {
+                                    "stroke-linecap": "round",
+                                    "stroke-linejoin": "round",
+                                    "stroke-width": "2",
+                                    d: "M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z",
+                                }
+                            }
+                            span { "{err}" }
+                        }
+                    }
+
+                    // Step content
+                    match step() {
+                        LoginStep::EmailInput => rsx!(
+                            form {
+                                onsubmit: on_email_submit,
+                                class: "space-y-4",
+                                fieldset {
+                                    class: "fieldset",
+                                    label { class: "fieldset-label", "Email address" }
+                                    input {
+                                        r#type: "email",
+                                        class: "input input-bordered w-full",
+                                        placeholder: "you@example.com",
+                                        required: true,
+                                        autofocus: true,
+                                        value: "{email}",
+                                        oninput: move |e| email.set(e.value()),
+                                    }
+                                }
+                                // Bollwark widget, pre-solving while the user
+                                // types. It injects its hidden `captcha-token`
+                                // input into this <form>, so the token is ready
+                                // by submit time and the new-user flow forwards
+                                // it without an extra screen. `invisible` mode
+                                // renders no chrome for low-risk visitors; an
+                                // escalated tier auto-renders a checkbox.
+                                if let Some((server_url, site_key)) = captcha_config.clone() {
+                                    document::Script {
+                                        src: "{server_url}/v1/widget.js",
+                                        defer: true,
+                                    }
+                                    div {
+                                        id: "bollwark-container",
+                                        class: "flex justify-center",
+                                        "data-sitekey": "{site_key}",
+                                        "data-server-url": "{server_url}",
+                                        "data-mode": "invisible",
+                                    }
+                                }
+                                button {
+                                    r#type: "submit",
+                                    class: "btn btn-primary w-full",
+                                    disabled: is_loading(),
+                                    if is_loading() {
+                                        span { class: "loading loading-spinner loading-sm" }
+                                    }
+                                    "Continue"
+                                }
+                                p { class: "text-xs text-base-content/40 text-center mt-3",
+                                    "No account yet? We'll create one for you."
+                                }
+                            }
+                        ),
+
+                        LoginStep::Detecting => rsx!(
+                            div { class: "text-center space-y-4 py-4",
+                                span { class: "loading loading-spinner loading-lg text-primary" }
+                                p { class: "text-base-content/70", "Setting things up..." }
+                            }
+                        ),
+
+                        LoginStep::PasskeyChallenge => rsx!(
+                            div { class: "text-center space-y-4 py-4",
+                                span { class: "loading loading-spinner loading-lg text-primary" }
+                                p { class: "font-medium", "Waiting for authentication..." }
+                                p { class: "text-sm text-base-content/50",
+                                    "Follow the prompt from your browser or device."
+                                }
+                            }
+                        ),
+
+                        LoginStep::PasswordInput => rsx!(
+                            div { class: "space-y-4",
+                                div { class: "text-center",
+                                    p { class: "text-sm text-base-content/70",
+                                        "Enter your password for"
+                                    }
+                                    p { class: "font-medium text-sm", "{email}" }
+                                }
+
+                                form {
+                                    onsubmit: on_password_verify,
+                                    class: "space-y-4",
+                                    fieldset {
+                                        class: "fieldset",
+                                        label { class: "fieldset-label", "Password" }
+                                        input {
+                                            r#type: "password",
+                                            class: "input input-bordered w-full",
+                                            placeholder: "Enter your password",
+                                            autofocus: true,
+                                            autocomplete: "current-password",
+                                            value: "{password}",
+                                            oninput: move |e| password.set(e.value()),
+                                        }
+                                    }
+                                    button {
+                                        r#type: "submit",
+                                        class: "btn btn-primary w-full",
+                                        disabled: is_loading(),
+                                        if is_loading() {
+                                            span { class: "loading loading-spinner loading-sm" }
+                                        }
+                                        "Sign in"
+                                    }
+                                }
+
+                                div { class: "flex justify-start items-center text-sm",
+                                    button {
+                                        class: "btn btn-ghost btn-sm text-base-content/50",
+                                        onclick: on_back,
+                                        "Back"
+                                    }
+                                }
+                            }
+                        ),
+
+                        LoginStep::OtpCodeInput => rsx!(
+                            div { class: "space-y-4",
+                                div { class: "text-center",
+                                    if is_new_user() {
+                                        div { class: "badge badge-success badge-outline mb-2",
+                                            "Account created"
+                                        }
+                                    }
+                                    p { class: "text-sm text-base-content/70",
+                                        "We sent a verification code to"
+                                    }
+                                    p { class: "font-medium text-sm", "{email}" }
+                                }
+
+                                form {
+                                    onsubmit: on_otp_verify,
+                                    class: "space-y-4",
+                                    fieldset {
+                                        class: "fieldset",
+                                        label { class: "fieldset-label", "Verification code" }
+                                        input {
+                                            r#type: "text",
+                                            class: "input input-bordered w-full text-center text-xl tracking-widest",
+                                            placeholder: "000000",
+                                            maxlength: "8",
+                                            autofocus: true,
+                                            autocomplete: "one-time-code",
+                                            inputmode: "numeric",
+                                            value: "{otp_code}",
+                                            oninput: move |e| otp_code.set(e.value()),
+                                        }
+                                    }
+                                    button {
+                                        r#type: "submit",
+                                        class: "btn btn-primary w-full",
+                                        disabled: is_loading(),
+                                        if is_loading() {
+                                            span { class: "loading loading-spinner loading-sm" }
+                                        }
+                                        "Verify"
+                                    }
+                                }
+
+                                div { class: "flex justify-between items-center text-sm",
+                                    button {
+                                        class: "btn btn-ghost btn-sm text-base-content/50",
+                                        onclick: on_back,
+                                        "Back"
+                                    }
+                                    div { class: "flex gap-1",
+                                        if has_password() {
+                                            button {
+                                                class: "btn btn-ghost btn-sm text-primary",
+                                                onclick: on_use_password,
+                                                disabled: is_loading(),
+                                                "Use password"
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-sm text-primary",
+                                            onclick: on_resend_otp,
+                                            disabled: is_loading(),
+                                            "Resend code"
+                                        }
+                                    }
+                                }
+                            }
+                        ),
+
+                        LoginStep::TosAcceptance => rsx!(
+                            div { class: "space-y-4",
+                                div { class: "text-center",
+                                    h2 { class: "text-lg font-semibold", "Almost there!" }
+                                    p { class: "text-sm text-base-content/70 mt-1",
+                                        "Please review and accept our terms to continue."
+                                    }
+                                }
+                                label { class: "label cursor-pointer justify-start gap-3",
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "checkbox checkbox-primary",
+                                        checked: tos_accepted(),
+                                        onchange: move |evt: Event<FormData>| {
+                                            tos_accepted.set(evt.checked());
+                                        },
+                                    }
+                                    span { class: "label-text",
+                                        "I agree to the "
+                                        a {
+                                            href: "/legal/terms",
+                                            target: "_blank",
+                                            class: "link link-primary",
+                                            "Terms of Service"
+                                        }
+                                        " and "
+                                        a {
+                                            href: "/legal/privacy",
+                                            target: "_blank",
+                                            class: "link link-primary",
+                                            "Privacy Policy"
+                                        }
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-primary w-full",
+                                    disabled: !tos_accepted() || is_loading(),
+                                    onclick: on_tos_accept,
+                                    if is_loading() {
+                                        span { class: "loading loading-spinner loading-sm" }
+                                    }
+                                    "Continue"
+                                }
+                            }
+                        ),
+
+                        LoginStep::Verifying => rsx!(
+                            div { class: "text-center space-y-4 py-4",
+                                span { class: "loading loading-spinner loading-lg text-primary" }
+                                p { class: "text-base-content/70", "Verifying..." }
+                            }
+                        ),
+
+                        LoginStep::Success { redirect_url: _ } => rsx!(
+                            div { class: "text-center space-y-4 py-4",
+                                div { class: "text-success text-4xl mb-2",
+                                    svg {
+                                        xmlns: "http://www.w3.org/2000/svg",
+                                        class: "h-12 w-12 mx-auto",
+                                        fill: "none",
+                                        "viewBox": "0 0 24 24",
+                                        "stroke-width": "2",
+                                        stroke: "currentColor",
+                                        path {
+                                            "stroke-linecap": "round",
+                                            "stroke-linejoin": "round",
+                                            d: "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                                        }
+                                    }
+                                }
+                                p { class: "font-medium", "Login successful!" }
+                                p { class: "text-sm text-base-content/50", "Redirecting..." }
+                                span { class: "loading loading-spinner loading-sm" }
+                            }
+                        ),
+                    }
+    );
+
+    // Gate the whole form on hydration.
+    //
+    // A disabled <fieldset> disables every control inside it, so one attribute
+    // covers all six steps rather than each input and button opting in. It also
+    // fixes the sharper bug: with the submit button disabled the browser skips
+    // implicit (Enter-key) submission, which pre-hydration would otherwise do a
+    // native GET to the current URL — reloading the page and discarding the
+    // email the user just typed.
+    //
+    // `display: contents` keeps the fieldset out of the layout so the card's
+    // existing spacing is untouched.
+    let inner = rsx! {
+        fieldset { class: "contents", disabled: !hydrated(), {inner} }
+        if !hydrated() {
+            div {
+                class: "flex items-center justify-center gap-2 mt-4 text-xs text-base-content/50",
+                "aria-live": "polite",
+                span { class: "loading loading-spinner loading-xs" }
+                "Starting up…"
+            }
+            // If the bundle never arrives there is no Rust running to notice,
+            // so this is revealed by a CSS delay rather than a timer (see
+            // `.hydration-stall`). Hydration removes the whole block first on
+            // any healthy load.
+            div { class: "hydration-stall text-center text-xs text-warning mt-2",
+                "Still loading — if this doesn't clear, try reloading the page."
+            }
+        }
+        {dev_login_control}
+    };
+
+    if embed {
+        rsx! { {inner} }
+    } else {
+        rsx!(
+            div { class: "min-h-screen flex flex-col items-center justify-center bg-base-200",
+                div { class: "card w-full max-w-md bg-base-100 shadow-xl",
+                    div { class: "card-body",
+                        // Logo / header
+                        div { class: "text-center mb-6",
+                            h1 { class: "text-2xl font-bold", "Welcome" }
+                            p { class: "text-sm text-base-content/60 mt-1",
+                                "Sign in or create an account"
+                            }
+                        }
+                        {inner}
+                    }
+                }
+            }
+        )
+    }
+}
+
+// ── Dev login ───────────────────────────────────────────────────────
+
+/// Whether the login page should offer the dev-login control.
+///
+/// Mirrors the gates on `POST /auth/dev-login` (see `handlers::dev_login`):
+/// the whole thing is compiled out of release builds, and stays off in a debug
+/// build unless `DEV_LOGIN=true`.
+#[cfg(debug_assertions)]
+#[get("/api/auth/dev-login-available")]
+async fn dev_login_available() -> Result<bool, ServerFnError> {
+    Ok(std::env::var("DEV_LOGIN").as_deref() == Ok("true"))
+}
+
+// ── Login step state machine ────────────────────────────────────────
+
+#[derive(Clone, PartialEq)]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+enum LoginStep {
+    EmailInput,
+    Detecting,
+    PasskeyChallenge,
+    PasswordInput,
+    OtpCodeInput,
+    TosAcceptance,
+    Verifying,
+    Success { redirect_url: String },
+}
+
+// ── Bollwark widget helpers ─────────────────────────────────────────
+
+/// Reads the bollwark widget's hidden `captcha-token` input from the DOM
+/// verbatim. The value is an opaque token — it is forwarded as-is to the
+/// server (which forwards it to `/v1/verify`) and never parsed. Returns
+/// `None` when the widget hasn't produced a token yet.
+#[cfg(feature = "web")]
+fn read_captcha_token_from_dom() -> Option<String> {
+    let raw = js_sys::eval(
+        r#"(() => {
+            const el = document.querySelector('input[name="captcha-token"]');
+            return el ? el.value : "";
+        })()"#,
+    )
+    .ok()?
+    .as_string()?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw)
+}
+
+/// Complete the new-user captcha flow from the email step. The widget has been
+/// pre-solving invisibly inside the email form; poll for its token (up to
+/// ~12s), forward it to the server, and on success advance to OTP entry. The
+/// step stays on EmailInput so a rejection or timeout lets the user simply
+/// resubmit while the widget keeps solving.
+#[cfg(feature = "web")]
+async fn complete_captcha_flow(
+    mut step: Signal<LoginStep>,
+    mut error_msg: Signal<Option<String>>,
+    mut is_loading: Signal<bool>,
+) {
+    // Poll for the solved token (~60 tries × 200ms ≈ 12s). It is normally
+    // already present by the time the user finishes typing and submitting.
+    let mut token = None;
+    for _ in 0..60 {
+        if let Some(t) = read_captcha_token_from_dom() {
+            token = Some(t);
+            break;
+        }
+        gloo_timers::future::TimeoutFuture::new(200).await;
+    }
+
+    let Some(token) = token else {
+        error_msg.set(Some(
+            "Verification is still loading. Please wait a moment and try again.".to_string(),
+        ));
+        is_loading.set(false);
+        return;
+    };
+
+    let result: std::result::Result<CaptchaVerifyResp, String> = wasm_post_json(
+        "/auth/session/captcha/verify",
+        Some(serde_json::json!({ "captcha_token": token })),
+    )
+    .await;
+    match result {
+        Ok(resp) if resp.success => {
+            error_msg.set(None);
+            step.set(LoginStep::OtpCodeInput);
+            is_loading.set(false);
+        }
+        Ok(resp) => {
+            error_msg.set(Some(
+                resp.error
+                    .unwrap_or_else(|| "Verification failed".to_string()),
+            ));
+            reset_captcha_widget();
+            is_loading.set(false);
+        }
+        Err(e) => {
+            error_msg.set(Some(e));
+            reset_captcha_widget();
+            is_loading.set(false);
+        }
+    }
+}
+
+/// Clear the stale captcha token and reset the widget so it produces a fresh
+/// puzzle (and auto-solves it) for the next submit attempt.
+#[cfg(feature = "web")]
+fn reset_captcha_widget() {
+    let _ = js_sys::eval(
+        r#"(function() {
+            const el = document.querySelector('input[name="captcha-token"]');
+            if (el) el.value = "";
+            const a = window.Bollwark && window.Bollwark._instances;
+            if (a) a.forEach((w) => w.reset());
+        })();"#,
+    );
+}
+
+// ── WASM HTTP helpers ───────────────────────────────────────────────
+
+#[cfg(feature = "web")]
+#[derive(serde::Deserialize)]
+struct StartSessionResp {
+    #[allow(dead_code)]
+    session_id: String,
+    public_key_options: Option<serde_json::Value>,
+    otp_sent: bool,
+    is_new_user: bool,
+    #[allow(dead_code)]
+    has_passkeys: bool,
+    has_password: bool,
+    #[allow(dead_code)]
+    needs_tos_acceptance: Option<bool>,
+    #[allow(dead_code)]
+    redirect_url: Option<String>,
+    captcha_required: Option<bool>,
+}
+
+#[cfg(feature = "web")]
+#[derive(serde::Deserialize)]
+struct CaptchaVerifyResp {
+    success: bool,
+    #[allow(dead_code)]
+    otp_sent: bool,
+    error: Option<String>,
+}
+
+#[cfg(feature = "web")]
+#[derive(serde::Deserialize)]
+struct VerifyResp {
+    success: bool,
+    redirect_url: Option<String>,
+    needs_tos_acceptance: Option<bool>,
+    error: Option<String>,
+}
+
+/// Generic WASM POST helper that sends JSON and deserializes the response.
+#[cfg(feature = "web")]
+async fn wasm_post_json<R: for<'de> serde::Deserialize<'de>>(
+    url: &str,
+    body: Option<serde_json::Value>,
+) -> std::result::Result<R, String> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{Headers, Request, RequestCredentials, RequestInit, Response, window};
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_credentials(RequestCredentials::SameOrigin);
+
+    let headers = Headers::new().map_err(|_| "Failed to create headers".to_string())?;
+    headers
+        .set("Content-Type", "application/json")
+        .map_err(|_| "Failed to set header".to_string())?;
+    opts.set_headers(&headers);
+
+    if let Some(b) = body {
+        opts.set_body(&wasm_bindgen::JsValue::from_str(&b.to_string()));
+    }
+
+    let request = Request::new_with_str_and_init(url, &opts)
+        .map_err(|_| "Failed to create request".to_string())?;
+
+    let window = window().ok_or("No window".to_string())?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|_| "Network error".to_string())?;
+
+    let resp: Response = resp_value
+        .dyn_into()
+        .map_err(|_| "Invalid response".to_string())?;
+
+    if !resp.ok() {
+        let text = JsFuture::from(
+            resp.text()
+                .map_err(|_| "Failed to read response".to_string())?,
+        )
+        .await
+        .map_err(|_| "Failed to read response text".to_string())?;
+        let msg = text
+            .as_string()
+            .unwrap_or_else(|| "Request failed".to_string());
+        return Err(msg);
+    }
+
+    let json = JsFuture::from(
+        resp.json()
+            .map_err(|_| "Failed to parse response".to_string())?,
+    )
+    .await
+    .map_err(|_| "Failed to parse JSON".to_string())?;
+
+    serde_wasm_bindgen::from_value(json).map_err(|e| format!("Deserialization error: {}", e))
+}
+
+/// Start session flow: POST to /auth/session/start, then auto-trigger passkey or show OTP.
+#[cfg(feature = "web")]
+#[allow(clippy::too_many_arguments)]
+fn start_session_flow(
+    email_val: String,
+    redirect_url: String,
+    mut step: Signal<LoginStep>,
+    mut error_msg: Signal<Option<String>>,
+    mut is_new_user: Signal<bool>,
+    mut has_password: Signal<bool>,
+    mut is_loading: Signal<bool>,
+    mut passkey_options: Signal<Option<String>>,
+    captcha_widget: bool,
+    user_refresh: Signal<UserDataRefreshTrigger>,
+) {
+    spawn(async move {
+        is_loading.set(true);
+
+        let mut body = serde_json::json!({ "email": email_val });
+        if !redirect_url.is_empty() {
+            body["redirect_url"] = serde_json::Value::String(redirect_url);
+        }
+
+        let result: std::result::Result<StartSessionResp, String> =
+            wasm_post_json("/auth/session/start", Some(body)).await;
+
+        match result {
+            Ok(resp) => {
+                is_new_user.set(resp.is_new_user);
+                has_password.set(resp.has_password);
+
+                if resp.captcha_required == Some(true) {
+                    if captcha_widget {
+                        // The bollwark widget has been pre-solving inside the
+                        // email form; forward its token. Stay on EmailInput so
+                        // a rejection or timeout lets the user simply resubmit
+                        // while the widget keeps solving.
+                        step.set(LoginStep::EmailInput);
+                        complete_captcha_flow(step, error_msg, is_loading).await;
+                    } else {
+                        // The server asked for a captcha the page cannot mount:
+                        // `captcha_config` was not passed to `LoginPage`.
+                        error_msg.set(Some(
+                            "Verification is unavailable. Please try again later.".to_string(),
+                        ));
+                        step.set(LoginStep::EmailInput);
+                        is_loading.set(false);
+                    }
+                } else if let Some(pk_opts) = resp.public_key_options {
+                    // Server detected passkeys → auto-trigger WebAuthn
+                    passkey_options.set(Some(pk_opts.to_string()));
+                    step.set(LoginStep::PasskeyChallenge);
+                    is_loading.set(false);
+
+                    trigger_passkey_auth(
+                        passkey_options,
+                        step,
+                        error_msg,
+                        is_loading,
+                        user_refresh,
+                    );
+                } else if resp.has_password {
+                    // User has password → show password input.
+                    step.set(LoginStep::PasswordInput);
+                    is_loading.set(false);
+                } else if resp.otp_sent {
+                    // OTP-only flow
+                    step.set(LoginStep::OtpCodeInput);
+                    is_loading.set(false);
+                } else {
+                    error_msg.set(Some("Unexpected response from server".to_string()));
+                    step.set(LoginStep::EmailInput);
+                    is_loading.set(false);
+                }
+            }
+            Err(e) => {
+                error_msg.set(Some(e));
+                step.set(LoginStep::EmailInput);
+                is_loading.set(false);
+            }
+        }
+    });
+}
+
+/// Trigger the WebAuthn browser API to get a passkey assertion, then verify it.
+/// On failure/cancel, transitions to OtpCodeInput via the fallback endpoint.
+#[cfg(feature = "web")]
+fn trigger_passkey_auth(
+    passkey_options: Signal<Option<String>>,
+    mut step: Signal<LoginStep>,
+    mut error_msg: Signal<Option<String>>,
+    mut is_loading: Signal<bool>,
+    mut user_refresh: Signal<UserDataRefreshTrigger>,
+) {
+    spawn(async move {
+        let Some(options_json) = passkey_options() else {
+            error_msg.set(Some("No passkey challenge available".to_string()));
+            step.set(LoginStep::EmailInput);
+            return;
+        };
+
+        match crate::webauthn_helpers::browser_get_passkey(&options_json).await {
+            Ok(assertion_data) => {
+                step.set(LoginStep::Verifying);
+                let verify_result: std::result::Result<VerifyResp, String> = wasm_post_json(
+                    "/auth/session/passkey/verify",
+                    Some(serde_json::json!({ "credential_assertion_data": assertion_data })),
+                )
+                .await;
+                match verify_result {
+                    Ok(resp) => {
+                        if resp.success {
+                            if resp.needs_tos_acceptance == Some(true) {
+                                step.set(LoginStep::TosAcceptance);
+                                is_loading.set(false);
+                            } else if let Some(url) = resp.redirect_url {
+                                step.set(LoginStep::Success {
+                                    redirect_url: url.clone(),
+                                });
+                                user_refresh.write().0 += 1;
+                            }
+                        } else {
+                            let msg = resp
+                                .error
+                                .unwrap_or_else(|| "Verification failed".to_string());
+                            error_msg.set(Some(msg));
+                            step.set(LoginStep::PasskeyChallenge);
+                            is_loading.set(false);
+                        }
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                        step.set(LoginStep::PasskeyChallenge);
+                        is_loading.set(false);
+                    }
+                }
+            }
+            Err(e) => {
+                if e.contains("cancelled") || e.contains("timed out") {
+                    error_msg.set(Some("Passkey authentication was cancelled.".to_string()));
+                } else {
+                    error_msg.set(Some(format!("Passkey authentication failed: {}", e)));
+                }
+                step.set(LoginStep::PasskeyChallenge);
+                is_loading.set(false);
+            }
+        }
+    });
+}

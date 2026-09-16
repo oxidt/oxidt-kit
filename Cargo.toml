@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Hauke Jung <hauke.jung@outlook.de>"]
 license = "MIT"
-repository = "https://github.com/hauju/dx-kit"
+repository = "https://github.com/oxidt/oxidt-kit"
 
 [workspace.dependencies]
 base64 = "0.22"

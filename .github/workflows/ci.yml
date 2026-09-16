@@ -25,13 +25,13 @@ jobs:
       # --all-features only proves the maximal build. Every optional feature is
       # also a configuration some app actually ships, and a misplaced `cfg` breaks
       # exactly those and nothing else. Check the combinations real consumers use.
-      - name: dx-auth without passkey-rp (what the six FerrisKey apps build)
-        run: cargo clippy -p dx-auth --features server,web --all-targets -- -D warnings
-      - name: dx-auth with passkey-rp
-        run: cargo clippy -p dx-auth --features passkey-rp,web --all-targets -- -D warnings
-      - name: dx-auth local-login without FerrisKey wiring
-        run: cargo clippy -p dx-auth --features local-login,web --all-targets -- -D warnings
-      - name: dx-auth server-only (no web)
-        run: cargo check -p dx-auth --features server
-      - name: dx-umami client bridge on the target it actually ships to
-        run: cargo check -p dx-umami --target wasm32-unknown-unknown
+      - name: oxidt-auth without passkey-rp (what the six FerrisKey apps build)
+        run: cargo clippy -p oxidt-auth --features server,web --all-targets -- -D warnings
+      - name: oxidt-auth with passkey-rp
+        run: cargo clippy -p oxidt-auth --features passkey-rp,web --all-targets -- -D warnings
+      - name: oxidt-auth local-login without FerrisKey wiring
+        run: cargo clippy -p oxidt-auth --features local-login,web --all-targets -- -D warnings
+      - name: oxidt-auth server-only (no web)
+        run: cargo check -p oxidt-auth --features server
+      - name: oxidt-umami client bridge on the target it actually ships to
+        run: cargo check -p oxidt-umami --target wasm32-unknown-unknown

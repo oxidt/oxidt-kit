@@ -1,20 +1,24 @@
-# dx-kit
+# oxidt-kit
 
 Small, dependency-light Rust crates for SaaS backends — the pieces that every
 app ends up re-implementing. Extracted from several apps that each carried their
 own copy, so a fix lands once instead of once per app.
 
+Formerly `hauju/dx-kit` with `dx-*` crate names. The old `dx-*-v*` tags still
+resolve through GitHub's redirect, so pinned apps keep building; new releases
+are tagged `oxidt-*-v*`.
+
 | crate | what it is |
 |---|---|
-| [`dx-crypto`](crates/dx-crypto) | secure random, Argon2 hashing, SHA-256 lookup hashes, API-key / CSRF / invitation tokens, PKCE `S256`, AES-256-GCM at rest |
-| [`dx-smtp`](crates/dx-smtp) | Lettre-backed SMTP — pooled sync/async clients with retry and timeouts, plus a one-shot per-tenant sender |
-| [`dx-auth`](crates/dx-auth) | FerrisKey OIDC, custom login UI (passkey / password / email-OTP), sessions, CSRF, rate limiting, and an optional self-owned WebAuthn Relying Party |
-| [`dx-umami`](crates/dx-umami) | self-hosted Umami analytics — same-origin tracker proxy (ad-blocker bypass, forwards `X-Forwarded-For` so countries survive), client event bridge with numeric revenue props, session identify, script mount |
-| [`dx-s3`](crates/dx-s3) | S3-compatible object storage with its own SigV4 signer over the kit's reqwest stack — put/get/head/list/copy/delete, presigned GET/PUT, retry, errors by cause; no SDK |
-| [`dx-monitor`](crates/dx-monitor) | the surface the central project board polls — `GET /health` liveness and bearer-guarded `GET /api/admin/metrics` KPIs, over an app-supplied source trait |
+| [`oxidt-crypto`](crates/oxidt-crypto) | secure random, Argon2 hashing, SHA-256 lookup hashes, API-key / CSRF / invitation tokens, PKCE `S256`, AES-256-GCM at rest |
+| [`oxidt-smtp`](crates/oxidt-smtp) | Lettre-backed SMTP — pooled sync/async clients with retry and timeouts, plus a one-shot per-tenant sender |
+| [`oxidt-auth`](crates/oxidt-auth) | FerrisKey OIDC, custom login UI (passkey / password / email-OTP), sessions, CSRF, rate limiting, and an optional self-owned WebAuthn Relying Party |
+| [`oxidt-umami`](crates/oxidt-umami) | self-hosted Umami analytics — same-origin tracker proxy (ad-blocker bypass, forwards `X-Forwarded-For` so countries survive), client event bridge with numeric revenue props, session identify, script mount |
+| [`oxidt-s3`](crates/oxidt-s3) | S3-compatible object storage with its own SigV4 signer over the kit's reqwest stack — put/get/head/list/copy/delete, presigned GET/PUT, retry, errors by cause; no SDK |
+| [`oxidt-monitor`](crates/oxidt-monitor) | the surface the central project board polls — `GET /health` liveness and bearer-guarded `GET /api/admin/metrics` KPIs, over an app-supplied source trait |
 
 All are storage-agnostic: no database dependency, no ORM types in any public
-signature. `dx-auth` reaches storage through the `AuthUserStore`,
+signature. `oxidt-auth` reaches storage through the `AuthUserStore`,
 `AuthEmailSender` and `AuthRateLimitStore` traits, which the host app
 implements. Planned: billing.
 
@@ -24,23 +28,23 @@ Depend on a tag, not a branch — the tag *is* the version:
 
 ```toml
 [dependencies]
-dx-crypto = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-crypto-v0.1.0" }
-dx-smtp   = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-smtp-v0.1.0" }
-dx-auth   = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-auth-v0.4.1" }
-dx-umami  = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-umami-v0.1.0" }
-dx-s3     = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-s3-v0.1.0" }
-dx-monitor = { git = "https://github.com/hauju/dx-kit.git", tag = "dx-monitor-v0.1.0" }
+oxidt-crypto = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-crypto-v0.1.0" }
+oxidt-smtp   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-smtp-v0.1.0" }
+oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.12.0" }
+oxidt-umami  = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-umami-v0.1.0" }
+oxidt-s3     = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-s3-v0.1.0" }
+oxidt-monitor = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-monitor-v0.1.0" }
 ```
 
-`dx-auth` has no default features. Enable `server`, `web`, or both — apps
+`oxidt-auth` has no default features. Enable `server`, `web`, or both — apps
 normally propagate both. Add `passkey-rp` to act as your own WebAuthn Relying
 Party (see the design note below); it implies `server`.
 
-`dx-umami` has one feature, `server` (the axum proxy routes); the client bridge
+`oxidt-umami` has one feature, `server` (the axum proxy routes); the client bridge
 is target-gated instead of feature-gated, so the same calls compile to no-ops
 in the server binary. Gate only the proxy behind your app's `server` feature:
-`dx-umami = { …, features = ["server"] }` in the optional server dependency
-position, or propagate `dx-umami/server` from your app's `server` feature.
+`oxidt-umami = { …, features = ["server"] }` in the optional server dependency
+position, or propagate `oxidt-umami/server` from your app's `server` feature.
 
 CI checks each combination a real app ships, not just `--all-features`: an
 optional feature is a configuration someone builds, and a misplaced `cfg` breaks
@@ -50,7 +54,7 @@ If your app already has hundreds of `crypto::` / `smtp::` call sites, rename at
 the dependency instead of touching them all:
 
 ```toml
-crypto = { package = "dx-crypto", git = "https://github.com/hauju/dx-kit.git", tag = "dx-crypto-v0.1.0" }
+crypto = { package = "oxidt-crypto", git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-crypto-v0.1.0" }
 ```
 
 ### Developing the kit from inside an app
@@ -59,9 +63,9 @@ Point the git dependency at your local checkout with a gitignored
 `.cargo/config.toml` in the consuming app:
 
 ```toml
-[patch."https://github.com/hauju/dx-kit.git"]
-dx-crypto = { path = "../../dx-kit/crates/dx-crypto" }
-dx-smtp   = { path = "../../dx-kit/crates/dx-smtp" }
+[patch."https://github.com/oxidt/oxidt-kit.git"]
+oxidt-crypto = { path = "../../oxidt-kit/crates/oxidt-crypto" }
+oxidt-smtp   = { path = "../../oxidt-kit/crates/oxidt-smtp" }
 ```
 
 Edit in place, and cut a tag when the change settles. Because the patch lives in
@@ -72,7 +76,7 @@ an untracked file, CI still builds against the pinned tag.
 Tag per crate so consumers can move independently:
 
 ```
-git tag dx-crypto-v0.2.0 && git push origin dx-crypto-v0.2.0
+git tag oxidt-crypto-v0.2.0 && git push origin oxidt-crypto-v0.2.0
 ```
 
 Bump `version` in the crate's `Cargo.toml` in the same commit as the change, so
@@ -83,7 +87,7 @@ the tag and the manifest agree.
 Where the source copies disagreed, the kit takes the safer option rather than
 the most common one.
 
-### dx-crypto
+### oxidt-crypto
 
 - **rand 0.9.** Argon2 salting uses argon2's own `rand_core` re-export, so the
   module does not care which `rand` major version the crate is on.
@@ -99,7 +103,7 @@ the most common one.
 - **AES-GCM nonce handling** validates the nonce length on decrypt instead of
   panicking on short input.
 
-### dx-smtp
+### oxidt-smtp
 
 - **`SmtpSecurity` instead of `insecure: bool`.** Transport security is an
   explicit enum (`Tls`, `StartTls`, `None`) with no domain types from any app.
@@ -118,7 +122,7 @@ the most common one.
 - **`send_email_with`** is the per-tenant path: fresh transport, single bounded
   attempt, no retry, so one hung customer relay cannot stall a shared queue.
 
-### dx-auth
+### oxidt-auth
 
 Reconciled from the six copies closest to `dx-saas-template`. The template copy
 (byte-identical in mcpi) was the baseline and won almost everywhere; measured
@@ -148,7 +152,7 @@ cadence and dx-blog. Each decision:
   gated on `DEV_LOGIN=true` at runtime. Four of the six copies had dropped it.
 - **The captcha stays optional.** It is inert unless `CAPTCHA_*` is configured,
   because a shared crate must not require an external service to be usable. As
-  of dx-auth 0.4.0 bollwark is the only captcha: the built-in image CAPTCHA is
+  of oxidt-auth 0.4.0 bollwark is the only captcha: the built-in image CAPTCHA is
   gone, and with it `captcha-rs` and the 88 transitive crates it pulled in.
   Unconfigured, registration falls back to the allowlist alone.
 
@@ -188,7 +192,7 @@ in the host app's stylesheet — a delayed reveal, since if the bundle never
 arrives there is no Rust running to notice. Without the class the notice simply
 shows immediately; nothing breaks.
 
-### dx-s3
+### oxidt-s3
 
 Four app copies were reviewed — seggwat (own SigV4 signer), stepshots and
 dx-blog (`rust-s3`), and the template copy shared by mcpi, dx-admin and
@@ -215,7 +219,7 @@ gaiasana (`rust-s3`, never wired up). None was extracted as-is.
 - **`exists` returns `Result<bool>`**, never a silent `false` on a network
   error — stepshots guarded a never-overwrite-the-original path on that.
 
-### dx-monitor
+### oxidt-monitor
 
 Two copies, stepshots and infrapage, same 113/127-line file under the same name
 (`server/admin_metrics.rs`) and already 102 lines apart. Both serve the same two
@@ -252,9 +256,9 @@ signatures most likely to differ:
 
 - `SmtpConfig { insecure: true }` → `SmtpConfig { security: SmtpSecurity::None }`.
 - `SmtpClientImpl::new(config)` returns `Result<Self>`, not a bare `Self`.
-- `SmtpSecurity` lives in `dx_smtp`; enable the `serde` feature to keep it
+- `SmtpSecurity` lives in `oxidt_smtp`; enable the `serde` feature to keep it
   serializable in persisted settings.
-- `pkce_s256_challenge` and `hash_api_key` are exported from the `dx_crypto`
+- `pkce_s256_challenge` and `hash_api_key` are exported from the `oxidt_crypto`
   root, not from submodules.
 
 ## License

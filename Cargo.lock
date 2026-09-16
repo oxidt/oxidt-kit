@@ -1379,111 +1379,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
-name = "dx-auth"
-version = "0.11.1"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "ciborium",
- "dioxus",
- "dx-crypto",
- "gloo-timers 0.4.0",
- "governor",
- "js-sys",
- "jsonwebtoken",
- "reqwest 0.13.4",
- "ring",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sha2",
- "subtle",
- "thiserror 2.0.20",
- "tokio",
- "tower-sessions",
- "tracing",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "dx-crypto"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "base64 0.22.1",
- "rand 0.9.5",
- "sha2",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "dx-monitor"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "dx-s3"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "hex",
- "hmac",
- "md5",
- "percent-encoding",
- "reqwest 0.13.4",
- "roxmltree",
- "secrecy",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "dx-smtp"
-version = "0.1.0"
-dependencies = [
- "lettre",
- "secrecy",
- "serde",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dx-umami"
-version = "0.1.0"
-dependencies = [
- "axum",
- "hex",
- "js-sys",
- "reqwest 0.13.4",
- "serde_json",
- "sha2",
- "tracing",
- "web-sys",
-]
-
-[[package]]
 name = "email-encoding"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2755,6 +2650,111 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "oxidt-auth"
+version = "0.11.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "ciborium",
+ "dioxus",
+ "gloo-timers 0.4.0",
+ "governor",
+ "js-sys",
+ "jsonwebtoken",
+ "oxidt-crypto",
+ "reqwest 0.13.4",
+ "ring",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower-sessions",
+ "tracing",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "oxidt-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "base64 0.22.1",
+ "rand 0.9.5",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oxidt-monitor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "oxidt-s3"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "hex",
+ "hmac",
+ "md5",
+ "percent-encoding",
+ "reqwest 0.13.4",
+ "roxmltree",
+ "secrecy",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "oxidt-smtp"
+version = "0.1.0"
+dependencies = [
+ "lettre",
+ "secrecy",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oxidt-umami"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "js-sys",
+ "reqwest 0.13.4",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "web-sys",
+]
 
 [[package]]
 name = "parking_lot"

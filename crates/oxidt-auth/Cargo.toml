@@ -1,0 +1,200 @@
+[package]
+name = "oxidt-auth"
+# Pinned ahead of the workspace version; tag and manifest must agree.
+# 0.1.1 folded in the rustls reqwest build. 0.2.0 adds the passkey-rp feature.
+# 0.2.1 adds the env-configured bollwark captcha (CAPTCHA_URL / _SITE_KEY /
+# _SECRET_KEY), which replaces the image CAPTCHA for new users when set.
+# 0.2.2 adds the optional `on_signup` callback on `LoginPage`, fired alongside
+# `on_success` when the flow registered a new account (for signup analytics).
+# 0.3.1 is dependency maintenance only: jsonwebtoken 11 and gloo-timers 0.4
+# (both internal, no API change), plus the lockfile bump that pulls h2 >=0.4.16
+# for RUSTSEC-2026-0258.
+# 0.4.0 drops the built-in image CAPTCHA and the captcha-rs dependency with it
+# (88 transitive crates, and both of the kit's unmaintained-crate advisories).
+# Bollwark is now the only captcha: set CAPTCHA_URL / _SITE_KEY / _SECRET_KEY.
+# Without them, new-user registration is gated by the allowlist alone, so a
+# public deployment must configure bollwark. Removes `POST
+# /auth/session/captcha/refresh`, the `captcha_image` response field, and the
+# `answer` field on the captcha-verify request.
+# 0.5.0 serialises the OTP and password attempt counters per session, so a burst
+# of parallel guesses no longer shares one read of the cap, and refuses to move
+# an existing account onto a new `sub` unless the IdP marks the email verified.
+# Breaking: `AuthUserInfo` gains `email_verified`, and an id_token without an
+# `email` claim is rejected instead of resolving to an empty address.
+# 0.6.0 adds the browser-redirect SSO mode (`AuthConfig::sso_enabled`): the
+# browser is sent to FerrisKey's hosted login page and redeems the code itself,
+# so FerrisKey's identity cookie lands in the browser and the next app in the
+# realm logs in without a prompt. Mounts `GET /auth/sso/start`,
+# `GET /auth/callback` and `POST /auth/sso/complete`; logout then ends the
+# FerrisKey session too. Breaking: `AuthConfig` gains `sso_enabled`, and an
+# id_token whose `nonce` is missing or wrong is now rejected.
+# 0.7.0 adds the `local-login` feature: a self-owned login flow (email OTP +
+# passkeys via the app's own Relying Party, no identity provider), folded in
+# from dx-admin's fork. Mounts `local_auth_router` and renders `LocalLoginPage`;
+# the OTP core (attempt cap under the session lock, recipient binding, captcha)
+# is now shared with the FerrisKey flow. Additive: with the feature off nothing
+# changes. With it on, `AuthUserStore` gains a required `get_user_by_id`.
+# 0.7.1 bounds every auth request body at 64 KiB on the FerrisKey router too
+# (the local router already did), and quiets the server-only build warnings
+# in `LoginPage`. No API change.
+# 0.8.0 adds `AuthConfig::open_registration` for public products: every address
+# may create an account, overriding the allowlists and the first-run bootstrap
+# rule, so a public sign-up no longer has to answer `has_any_users` with a lie.
+# Breaking: `AuthConfig` gains a required field.
+# 0.9.0 makes the terms version an `AuthConfig::tos_version` field instead of a
+# crate constant, so an app can roll out new terms (re-prompting everyone whose
+# stored version differs) without a oxidt-auth release. Breaking: `AuthConfig`
+# gains a required field; `Default` keeps the old "1.0".
+# 0.10.0 makes the terms step opt-in and gives it to the local flow too:
+# `tos_version` is now `Option<String>`, `None` (the default) means no
+# acceptance step on either router, `Some` gates both. The local router mounts
+# `POST /auth/session/accept-tos` and `LocalLoginPage` gains the step.
+# Breaking: the field's type; apps that relied on the implicit "1.0" gate set it.
+# 0.10.1 adds `webauthn_helpers::enroll_passkey_named`, so an app's settings page
+# can label a passkey at enrollment; `enroll_passkey` is unchanged. Additive.
+# 0.10.4 adds `AuthUserStore::is_invited`, consulted by the registration gate on
+# both flows so an app that invites people can admit an invited address while
+# registration is otherwise closed. Default `false`; additive.
+# 0.10.5 makes the dev login usable from the browser: `LoginPage` renders a
+# "Dev login (local only)" form under the normal methods, and
+# `POST /auth/dev-login` honours a form-encoded `redirect_url` (validated by the
+# same relative-path check the real login uses) instead of always landing on
+# `default_post_login_url` — so the app's OAuth flow resumes where it left off.
+# Both stay behind the existing gates: debug builds only, and `DEV_LOGIN=true`.
+# The `server` feature now also enables `dioxus/server`, which the new
+# `dev_login_available` server function needs to compile standalone.
+# 0.11.0 adds a password step to the local flow, for a self-hosted instance
+# that boots with only an admin email + password — no identity provider and no
+# SMTP. `AuthUserStore::verify_password` (defaulted to `false`) answers, and a
+# `true` is authorization by itself: the address is admitted whatever the
+# registration policy says, and the account is created on first login through
+# the same path a verified OTP uses. `AuthConfig::password_login` mounts the
+# step, and the start-session response mirrors it as `password` (plus `otp`,
+# whether the emailed-code branch exists at all) — both global, never
+# per-address, so neither can enumerate accounts. Breaking:
+# `AuthState::email_sender` is now an `Option`, with
+# `AuthState::local_without_email` for the no-SMTP case; every path that would
+# send mail answers `503` when it is `None`, as does `/auth/session/start` when
+# password login is off too. `AuthConfig` gains a required field.
+# 0.11.1 stops mailing an OTP at `/auth/session/start` while `password_login`
+# is on: the page asks for one through the passkey-fallback path instead.
+version = "0.11.1"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Authentication for the dx SaaS apps: FerrisKey OIDC, custom login UI (passkey/password/email-OTP), sessions, CSRF, and rate limiting"
+
+[dependencies]
+# Sibling kit crates (server-only)
+crypto = { package = "oxidt-crypto", path = "../oxidt-crypto", version = "0.1.0", optional = true }
+
+# Serialization (always needed for shared types)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = { workspace = true }
+
+# Server dependencies
+async-trait = { version = "0.1", optional = true }
+axum = { version = "0.8.8", optional = true }
+tower-sessions = { version = "0.14", default-features = false, features = [
+    "axum-core",
+], optional = true }
+# rustls, not the default native-tls: it keeps the build off OpenSSL, which
+# matters for the slim Debian runtime images these apps deploy into. dx-seo and
+# mistral had already made this change in their own copies; folding it in here
+# is what stops the kit regressing them.
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+    "json",
+    "query",
+    "form",
+], optional = true }
+tracing = { workspace = true, optional = true }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"], optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { workspace = true, optional = true }
+governor = { version = "0.10", optional = true, features = ["std"] }
+# rt + time for the rate limiter's idle-bucket sweeper task; sync for the
+# per-session attempt-counter locks.
+tokio = { version = "1", optional = true, features = ["rt", "time", "sync"] }
+chrono = { version = "0.4.43", default-features = false, features = [
+    "std",
+    "now",
+    "serde",
+], optional = true }
+url = { version = "2.5", optional = true }
+
+# WebAuthn Relying Party (`passkey-rp`). `ring` verifies assertion signatures
+# (ES256 / EdDSA / RS256); `ciborium` decodes the COSE key and the CBOR
+# attestation object. Both are optional so apps that federate passkeys through
+# the IdP never link them.
+ring = { version = "0.17", optional = true }
+ciborium = { version = "0.2", optional = true }
+
+# Web dependencies (login page component)
+dioxus = { version = "0.7.10", features = ["fullstack", "lib"], optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestCredentials",
+    "Response",
+    "Headers",
+] }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+gloo-timers = { version = "0.4", features = ["futures"], optional = true }
+subtle = "2.6.1"
+
+[dev-dependencies]
+# The attempt-counter tests drive real `Session` handles against an in-memory
+# store, the way concurrent requests carrying one cookie do in production.
+tower-sessions = { version = "0.14", features = ["memory-store"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[features]
+default = []
+server = [
+    "dep:dioxus",
+    # The dev-login availability server function expands to `dioxus_server`
+    # registration under this feature, so it has to be on here too.
+    "dioxus/server",
+    "dep:async-trait",
+    "dep:axum",
+    "dep:tower-sessions",
+    "dep:reqwest",
+    "dep:tracing",
+    "dep:chrono",
+    "dep:url",
+    "dep:crypto",
+    "dep:governor",
+    "dep:tokio",
+    "dep:jsonwebtoken",
+    "dep:sha2",
+    "dep:base64",
+]
+# This app is its own WebAuthn Relying Party: it runs the ceremonies and stores
+# credentials itself, rather than proxying passkeys through the identity
+# provider. Needed when accounts can be created by email OTP, since those have
+# no IdP user JWT and so can never enroll through the IdP's own endpoints.
+#
+# Additive, not an alternative: seggwat runs this alongside FerrisKey login.
+# Requires `server`, and an `AuthPasskeyStore` on `AuthState`.
+passkey-rp = ["server", "dep:ring", "dep:ciborium"]
+# Self-owned login: email OTP + passkeys, no identity provider. The app is its
+# own Relying Party (implies `passkey-rp`) and mounts `local_auth_router` in
+# place of `auth_router`. Additive at the crate level — the FerrisKey flow still
+# compiles — but the two routers own the same paths, so an app mounts one.
+local-login = ["passkey-rp"]
+web = [
+    "dep:dioxus",
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:serde-wasm-bindgen",
+    "dep:gloo-timers",
+]
