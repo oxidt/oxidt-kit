@@ -165,8 +165,8 @@ Two things to know when testing:
 ## Local mode (no identity provider)
 
 The `local-login` feature runs the crate without FerrisKey at all: email OTP
-(which also registers) plus passkeys verified by the app's own WebAuthn Relying
-Party. No passwords. It implies `passkey-rp`, so the app supplies an
+(which also registers), passkeys verified by the app's own WebAuthn Relying
+Party, and — opt-in — a password step. It implies `passkey-rp`, so the app supplies an
 `AuthPasskeyStore`, and `AuthUserStore` gains one required method,
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
@@ -206,6 +206,7 @@ offer after an OTP login.
 POST /auth/session/start                        email → passkey options | OTP
 POST /auth/session/otp/verify                   creates the account if new
 POST /auth/session/otp/resend
+POST /auth/session/password/verify              only when password_login is set
 POST /auth/session/passkey/verify
 POST /auth/session/passkey/conditional/options  discoverable (autofill) request
 POST /auth/session/passkey-fallback-otp         cancelled ceremony → OTP
@@ -223,6 +224,38 @@ invites people answers `AuthUserStore::is_invited` so an invitation is enough on
 its own. A verified OTP for
 a permitted, unknown address creates the account; `sub` is minted by the crate
 (an opaque random token) and never rewritten afterwards.
+
+### Password login, and running without SMTP
+
+`AuthConfig::password_login` (default `false`) adds a password step to the page
+and mounts `POST /auth/session/password/verify` (`{"email", "password"}`). The
+app owns the hash: `AuthUserStore::verify_password(email, password)` answers,
+defaulting to `false` so every existing impl keeps compiling. Verify with a
+constant-time comparison, and against a dummy hash for an unknown address so
+timing does not reveal which addresses exist.
+
+```rust
+// at boot: hash the configured admin password once
+let admin_hash = dx_crypto::hash_secret(&std::env::var("ADMIN_PASSWORD")?)?;
+// in the store: `email` arrives trimmed and lowercased
+async fn verify_password(&self, email: &str, password: &str) -> AuthResult<bool> {
+    Ok(email == self.admin_email && dx_crypto::verify_secret(&self.admin_hash, password))
+}
+```
+
+A `true` is authorization by itself — the operator configured that credential —
+so the address is admitted **whatever the registration policy says**, and the
+account is created on first login through the same path a verified OTP uses.
+The start-session response reports `password` (the flag) and `otp` (whether the
+emailed-code branch exists at all). Both are global, never per-address, so
+neither can be used to enumerate which addresses have a password.
+
+Without SMTP, build the state with `AuthState::local_without_email(user_store,
+passkey_store)`: `email_sender` is an `Option`, and every path that would send
+mail — start, resend, the passkey fallback — answers `503`. That leaves the
+password step (and passkeys) as the way in, so `POST /auth/session/start` says
+`otp: false, password: true`; with `password_login` off as well it answers
+`503` naming the misconfiguration, since the deployment can log nobody in.
 
 **Passkey RP ID.** Derived from `base_url`'s host. A credential only works
 against the RP ID it was registered under, so moving the app to another host

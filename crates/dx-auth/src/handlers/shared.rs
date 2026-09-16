@@ -409,7 +409,7 @@ mod tests {
     fn state(store: Arc<OneUserStore>) -> AuthState {
         AuthState {
             user_store: store,
-            email_sender: Arc::new(NoMail),
+            email_sender: Some(Arc::new(NoMail)),
             jwks_cache: Arc::new(crate::jwt::JwksCache::new(
                 "http://localhost:3333",
                 "http://localhost:3333",

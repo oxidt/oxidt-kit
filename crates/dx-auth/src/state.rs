@@ -14,7 +14,11 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AuthState {
     pub user_store: Arc<dyn AuthUserStore>,
-    pub email_sender: Arc<dyn AuthEmailSender>,
+    /// Sends the email OTP. `None` for a deployment with no SMTP at all: the
+    /// OTP branch is then unavailable and every path that would send mail
+    /// answers `503`, so the way in is a passkey or the password step
+    /// ([`crate::AuthConfig::password_login`]).
+    pub email_sender: Option<Arc<dyn AuthEmailSender>>,
     pub jwks_cache: Arc<JwksCache>,
     /// Optional shared store for rate limiting. `None` falls back to the
     /// in-process limiter, which under-counts across replicas — see
@@ -49,7 +53,27 @@ impl AuthState {
     ) -> Self {
         Self {
             user_store,
-            email_sender,
+            email_sender: Some(email_sender),
+            jwks_cache: Arc::new(JwksCache::new("", "", "", "")),
+            rate_limit_store: None,
+            passkey_store,
+        }
+    }
+
+    /// The same, for a deployment with no SMTP: an instance that boots with
+    /// only an admin email and password configured, and no identity provider.
+    ///
+    /// Without a sender the email-OTP branch cannot run, so
+    /// [`crate::AuthConfig::password_login`] must be on (or the account must
+    /// have a passkey) — otherwise `POST /auth/session/start` has nothing to
+    /// offer and says so with a `503`.
+    pub fn local_without_email(
+        user_store: Arc<dyn AuthUserStore>,
+        passkey_store: Arc<dyn crate::traits::AuthPasskeyStore>,
+    ) -> Self {
+        Self {
+            user_store,
+            email_sender: None,
             jwks_cache: Arc::new(JwksCache::new("", "", "", "")),
             rate_limit_store: None,
             passkey_store,

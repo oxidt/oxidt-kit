@@ -53,8 +53,11 @@ pub(crate) const TOS_PENDING_REDIRECT_KEY: &str = "tos.pending_redirect";
 // The FerrisKey user is only created after OTP is verified, preventing bot-created accounts.
 const DEFERRED_NEW_USER_KEY: &str = "ferriskey.deferred_new_user";
 
-const PASSWORD_ATTEMPTS_KEY: &str = "password.attempts";
-const MAX_PASSWORD_ATTEMPTS: u32 = 5;
+// Shared with the self-owned flow's password step (`local_login`): the two
+// routers are mounted instead of each other, so one counter and one cap serve
+// whichever is live.
+pub(super) const PASSWORD_ATTEMPTS_KEY: &str = "password.attempts";
+pub(super) const MAX_PASSWORD_ATTEMPTS: u32 = 5;
 
 // ── Request / Response types ────────────────────────────────────────
 

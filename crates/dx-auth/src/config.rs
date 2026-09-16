@@ -61,6 +61,22 @@ pub struct AuthConfig {
     /// with that unset, nothing stands in front of account creation.
     pub open_registration: bool,
 
+    // ── Password login (local mode) ───────────────────────────────
+    /// Offer a password step on the self-owned login flow
+    /// (`local_auth_router`): `POST /auth/session/password/verify`, and
+    /// `password: true` in the start-session response so the page shows the
+    /// field. Set it when the app has any password to verify — i.e. when it
+    /// overrides [`crate::AuthUserStore::verify_password`]; leaving it off
+    /// with an implementation that answers `true` means the page never asks
+    /// for one.
+    ///
+    /// The flag is global, never per-address: the start-session response
+    /// mirrors it as-is, so it cannot be used to enumerate which addresses
+    /// have a password. It is what makes an instance with only an admin
+    /// email + password — no identity provider and no SMTP — able to log
+    /// anyone in at all (see [`crate::AuthState::local_without_email`]).
+    pub password_login: bool,
+
     // ── Terms of service ──────────────────────────────────────────
     /// The terms version a user must have accepted to log in, or `None` for
     /// no acceptance step at all. Compared to what the store returns in
@@ -88,6 +104,7 @@ impl Default for AuthConfig {
             allowed_registration_emails: Vec::new(),
             allowed_registration_domains: Vec::new(),
             open_registration: false,
+            password_login: false,
             tos_version: None,
         }
     }

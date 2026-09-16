@@ -15,10 +15,11 @@ use crate::types::UserDataRefreshTrigger;
 use dioxus::prelude::*;
 
 /// Multi-step login page for the self-owned flow: email OTP with auto-passkey
-/// detection, passkey autofill (conditional UI), and a one-time passkey
-/// enrollment offer after an OTP login.
+/// detection, passkey autofill (conditional UI), an optional password step,
+/// and a one-time passkey enrollment offer after an OTP or password login.
 ///
-/// Flow: Email → (PasskeyChallenge | OtpCodeInput) → Verifying → OfferPasskey? → Success
+/// Flow: Email → (PasskeyChallenge | PasswordInput | OtpCodeInput) → Verifying
+/// → OfferPasskey? → Success
 // Several signals are only written from `web`-gated effects; on a server-only
 // build they read as needlessly mutable.
 #[cfg_attr(not(feature = "web"), allow(unused_mut, unused_variables))]
@@ -46,6 +47,11 @@ pub fn LocalLoginPage(
     let mut step = use_signal(|| LoginStep::EmailInput);
     let mut email = use_signal(String::new);
     let mut otp_code = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    // What the start response said this deployment offers. `otp_available`
+    // drives the "Email me a code instead" link on the password step; an
+    // instance with no SMTP has no such link to offer.
+    let otp_available = use_signal(|| true);
     let mut error_msg = use_signal(|| None::<String>);
     let mut success_msg = use_signal(|| None::<String>);
     // Field-level validation for the email step. Kept separate from `error_msg`
@@ -252,6 +258,7 @@ pub fn LocalLoginPage(
             step,
             error_msg,
             is_new_user,
+            otp_available,
             is_loading,
             passkey_options,
             user_refresh,
@@ -344,6 +351,65 @@ pub fn LocalLoginPage(
                 is_loading.set(false);
             }
         });
+    };
+
+    // Submit the password step → POST /auth/session/password/verify
+    let on_password_submit = move |evt: FormEvent| {
+        evt.prevent_default();
+        spawn(async move {
+            let pw = password();
+            if pw.is_empty() {
+                error_msg.set(Some("Please enter your password.".to_string()));
+                return;
+            }
+            is_loading.set(true);
+            error_msg.set(None);
+            success_msg.set(None);
+
+            #[cfg(feature = "web")]
+            {
+                let result: std::result::Result<VerifyResp, String> = wasm_post_json(
+                    "/auth/session/password/verify",
+                    Some(serde_json::json!({
+                        "email": email().trim().to_lowercase(),
+                        "password": pw,
+                    })),
+                )
+                .await;
+                // Whatever happened, the field does not keep the secret.
+                password.set(String::new());
+                match result {
+                    Ok(resp) if resp.success => {
+                        proceed_after_login(&resp, step, user_refresh, is_loading);
+                    }
+                    Ok(resp) => {
+                        error_msg.set(Some(
+                            resp.error.unwrap_or_else(|| "Sign-in failed".to_string()),
+                        ));
+                        is_loading.set(false);
+                    }
+                    Err(e) => {
+                        error_msg.set(Some(e));
+                        is_loading.set(false);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "web"))]
+            {
+                is_loading.set(false);
+            }
+        });
+    };
+
+    // Password step → the emailed code. No request: /auth/session/start already
+    // sent one on any deployment that has a sender (which is what `otp` reports).
+    let on_use_emailed_code = move |_| {
+        error_msg.set(None);
+        success_msg.set(None);
+        password.set(String::new());
+        otp_code.set(String::new());
+        step.set(LoginStep::OtpCodeInput);
     };
 
     // "Use email code instead" — passkey fallback to OTP
@@ -486,6 +552,7 @@ pub fn LocalLoginPage(
         success_msg.set(None);
         email_error.set(None);
         otp_code.set(String::new());
+        password.set(String::new());
         step.set(LoginStep::EmailInput);
     };
 
@@ -561,6 +628,7 @@ pub fn LocalLoginPage(
         LoginStep::PasskeyChallenge => "passkey",
         LoginStep::PasskeyRetry => "passkey-retry",
         LoginStep::OfferPasskey { .. } => "offer",
+        LoginStep::PasswordInput => "password",
         LoginStep::OtpCodeInput => "otp",
         LoginStep::Verifying => "verifying",
         LoginStep::TosAcceptance { .. } => "tos",
@@ -790,6 +858,58 @@ pub fn LocalLoginPage(
                                 span { class: "loading loading-spinner loading-sm" }
                             }
                             "Continue"
+                        }
+                    }
+                ),
+
+                LoginStep::PasswordInput => rsx!(
+                    div { class: "space-y-4",
+                        div { class: "text-center",
+                            p { class: "text-sm text-base-content/70", "Enter the password for" }
+                            p { class: "font-medium text-sm", "{email}" }
+                        }
+
+                        form {
+                            onsubmit: on_password_submit,
+                            class: "space-y-4",
+                            fieldset {
+                                class: "fieldset",
+                                label { class: "fieldset-label", "Password" }
+                                input {
+                                    r#type: "password",
+                                    class: "input input-bordered w-full",
+                                    placeholder: "••••••••",
+                                    autofocus: true,
+                                    autocomplete: "current-password",
+                                    value: "{password}",
+                                    oninput: move |e| password.set(e.value()),
+                                }
+                            }
+                            button {
+                                r#type: "submit",
+                                class: "btn btn-primary w-full",
+                                disabled: is_loading(),
+                                if is_loading() {
+                                    span { class: "loading loading-spinner loading-sm" }
+                                }
+                                "Sign in"
+                            }
+                        }
+
+                        div { class: "flex justify-between items-center text-sm",
+                            button {
+                                class: "btn btn-ghost btn-sm text-base-content/50",
+                                onclick: on_back,
+                                "Back"
+                            }
+                            if otp_available() {
+                                button {
+                                    class: "btn btn-ghost btn-sm text-primary",
+                                    onclick: on_use_emailed_code,
+                                    disabled: is_loading(),
+                                    "Email me a code instead"
+                                }
+                            }
                         }
                     }
                 ),
@@ -1038,6 +1158,9 @@ enum LoginStep {
         redirect_url: String,
     },
     OtpCodeInput,
+    /// The deployment offers a password (`AuthConfig::password_login`). Reached
+    /// after the email step, and the only way in when there is no email sender.
+    PasswordInput,
     Verifying,
     /// Session is open but the current terms are not accepted yet; the
     /// redirect arrives with the acceptance response. `offer_passkey` is
@@ -1060,6 +1183,12 @@ use crate::webauthn_helpers::wasm_post_json;
 struct StartSessionResp {
     public_key_options: Option<serde_json::Value>,
     otp_sent: bool,
+    /// Missing on a server older than the password step, which by definition
+    /// had an email sender.
+    #[serde(default = "otp_offered_by_default")]
+    otp: bool,
+    #[serde(default)]
+    password: bool,
     is_new_user: bool,
     #[allow(dead_code)]
     has_passkeys: bool,
@@ -1071,6 +1200,11 @@ struct StartSessionResp {
     captcha_server_url: Option<String>,
     #[allow(dead_code)]
     captcha_site_key: Option<String>,
+}
+
+#[cfg(feature = "web")]
+fn otp_offered_by_default() -> bool {
+    true
 }
 
 #[cfg(feature = "web")]
@@ -1275,6 +1409,7 @@ fn start_session_flow(
     mut step: Signal<LoginStep>,
     mut error_msg: Signal<Option<String>>,
     mut is_new_user: Signal<bool>,
+    mut otp_available: Signal<bool>,
     mut is_loading: Signal<bool>,
     mut passkey_options: Signal<Option<String>>,
     user_refresh: Signal<UserDataRefreshTrigger>,
@@ -1299,6 +1434,7 @@ fn start_session_flow(
         match result {
             Ok(resp) => {
                 is_new_user.set(resp.is_new_user);
+                otp_available.set(resp.otp);
 
                 if resp.captcha_required == Some(true) {
                     // New user → the captcha widget on the email step has been
@@ -1321,6 +1457,13 @@ fn start_session_flow(
                         user_refresh,
                         passkey_attempt,
                     );
+                } else if resp.password {
+                    // The deployment offers a password. Prefer it over the code
+                    // the server may also have mailed — that one is still one
+                    // click away on this step, and on an instance with no SMTP
+                    // there is no code at all.
+                    step.set(LoginStep::PasswordInput);
+                    is_loading.set(false);
                 } else if resp.otp_sent {
                     // OTP flow: either an existing account with no passkey, or a
                     // registration whose captcha (when configured) already passed.

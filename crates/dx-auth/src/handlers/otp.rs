@@ -152,6 +152,16 @@ pub(super) async fn generate_and_send_otp(
     email: &str,
     purpose: &str,
 ) -> AuthResult<()> {
+    // Every path that mails a code funnels through here — start, resend,
+    // captcha-verify, passkey fallback — so this is the one place that has to
+    // answer for a deployment with no sender wired.
+    let Some(email_sender) = auth_state.email_sender.clone() else {
+        return Err(AuthError::ServiceUnavailable(
+            "This deployment has no email sender configured, so it cannot send a verification code."
+                .to_string(),
+        ));
+    };
+
     let code = crypto::generate_numeric_otp(6)
         .map_err(|e| AuthError::ServerStateError(format!("Failed to generate OTP: {}", e)))?;
 
@@ -164,8 +174,7 @@ pub(super) async fn generate_and_send_otp(
     session.insert(CUSTOM_OTP_PURPOSE_KEY, purpose).await?;
     session.insert(CUSTOM_OTP_ATTEMPTS_KEY, 0u32).await?;
 
-    auth_state
-        .email_sender
+    email_sender
         .send_verification_code(email, &code, 10)
         .await
         .map_err(|e| {

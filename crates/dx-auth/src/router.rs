@@ -130,6 +130,7 @@ pub fn auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Router {
 /// - `POST /auth/session/start` — email in; passkey options or an emailed OTP out
 /// - `POST /auth/session/otp/verify` — verify the code; creates the account if new
 /// - `POST /auth/session/otp/resend` — throttled resend
+/// - `POST /auth/session/password/verify` — verify a password (only with `password_login`)
 /// - `POST /auth/session/passkey/verify` — verify a WebAuthn assertion
 /// - `POST /auth/session/passkey/conditional/options` — autofill (discoverable) options
 /// - `POST /auth/session/passkey-fallback-otp` — cancelled ceremony falls back to OTP
@@ -151,6 +152,12 @@ pub fn local_auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Rout
         .route("/auth/session/start", post(local::start_session))
         .route("/auth/session/otp/verify", post(local::verify_otp_handler))
         .route("/auth/session/otp/resend", post(local::resend_otp_handler))
+        // Same path the FerrisKey router uses for the IdP's password flow; the
+        // two routers are mounted instead of each other, so it is free here.
+        .route(
+            "/auth/session/password/verify",
+            post(local::verify_password_handler),
+        )
         .route(
             "/auth/session/passkey/verify",
             post(local::verify_passkey_handler),

@@ -63,7 +63,20 @@ name = "dx-auth"
 # Both stay behind the existing gates: debug builds only, and `DEV_LOGIN=true`.
 # The `server` feature now also enables `dioxus/server`, which the new
 # `dev_login_available` server function needs to compile standalone.
-version = "0.10.5"
+# 0.11.0 adds a password step to the local flow, for a self-hosted instance
+# that boots with only an admin email + password — no identity provider and no
+# SMTP. `AuthUserStore::verify_password` (defaulted to `false`) answers, and a
+# `true` is authorization by itself: the address is admitted whatever the
+# registration policy says, and the account is created on first login through
+# the same path a verified OTP uses. `AuthConfig::password_login` mounts the
+# step, and the start-session response mirrors it as `password` (plus `otp`,
+# whether the emailed-code branch exists at all) — both global, never
+# per-address, so neither can enumerate accounts. Breaking:
+# `AuthState::email_sender` is now an `Option`, with
+# `AuthState::local_without_email` for the no-SMTP case; every path that would
+# send mail answers `503` when it is `None`, as does `/auth/session/start` when
+# password login is off too. `AuthConfig` gains a required field.
+version = "0.11.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

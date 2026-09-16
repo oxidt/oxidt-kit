@@ -1,5 +1,5 @@
-//! Self-owned login flow. Two factors, both owned here — there is no external
-//! identity provider and no password anywhere.
+//! Self-owned login flow. Every factor is owned here — there is no external
+//! identity provider.
 //!
 //! * **Email OTP** — the universal baseline, for sign-in *and* sign-up. We mint
 //!   the code, mail it, and hold it in the session (see `otp`). A verified code
@@ -12,9 +12,16 @@
 //!   account has credentials; `verify_passkey_handler` checks the assertion and
 //!   finalizes. Enrollment lives in `passkey_enroll`.
 //!
-//! The flow is: email → passkey if the account has one → OTP otherwise, with
-//! OTP always reachable as the fallback when a passkey ceremony is cancelled or
-//! fails.
+//! * **Password** — opt-in (`AuthConfig::password_login`), and the app owns the
+//!   hash: `AuthUserStore::verify_password` answers, and a `true` is
+//!   authorization by itself. It exists so an instance can boot with nothing
+//!   but an admin email and password — no identity provider, no SMTP — which
+//!   is also why it is admitted whatever the registration policy says, and
+//!   creates the account on first login like a verified OTP does.
+//!
+//! The flow is: email → passkey if the account has one → password if the
+//! deployment offers one → OTP otherwise, with OTP always reachable as the
+//! fallback when a passkey ceremony is cancelled or fails.
 
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
@@ -25,8 +32,10 @@ use crate::error::{AuthError, AuthResult};
 use crate::handlers::otp::{
     CUSTOM_OTP_CODE_KEY, CUSTOM_OTP_LAST_SENT_AT_KEY, CUSTOM_OTP_PURPOSE_KEY,
     CUSTOM_OTP_RESEND_COUNT_KEY, MAX_RESEND_COUNT, RESEND_COOLDOWN_SECONDS, captcha_cfg,
-    clear_otp_state, generate_and_send_otp, verify_captcha_token, verify_otp_guarded,
+    clear_otp_state, generate_and_send_otp, lock_session, persist_now, verify_captcha_token,
+    verify_otp_guarded,
 };
+use crate::handlers::session_auth::{MAX_PASSWORD_ATTEMPTS, PASSWORD_ATTEMPTS_KEY};
 use crate::handlers::shared::{self, determine_post_login_redirect, registration_allowed};
 use crate::session::LoggedInData;
 use crate::state::AuthState;
@@ -58,28 +67,49 @@ pub struct StartSessionRequest {
     pub redirect_url: Option<String>,
 }
 
-#[derive(Serialize)]
+/// Deserialize as well as Serialize, and every added field defaults, so a
+/// client built against an older shape still parses this one.
+#[derive(Serialize, Deserialize)]
 pub struct StartSessionResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key_options: Option<serde_json::Value>,
     pub otp_sent: bool,
+    /// Whether the email-OTP branch is available at all — false when the
+    /// deployment has no email sender wired. Distinct from `otp_sent`, which
+    /// says a code was just mailed.
+    #[serde(default = "otp_available_by_default")]
+    pub otp: bool,
+    /// Whether this deployment offers the password step
+    /// (`AuthConfig::password_login`). Global, never per-address: it is the
+    /// same for every email, so the response cannot be used to find out which
+    /// addresses have a password.
+    #[serde(default)]
+    pub password: bool,
     pub is_new_user: bool,
     pub has_passkeys: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captcha_required: Option<bool>,
     /// Captcha server base URL + site key, returned only when a new-user
     /// registration needs the widget. Both values are public by design.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captcha_server_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captcha_site_key: Option<String>,
 }
 
+/// A response written before `otp` existed came from a deployment that had a
+/// sender — that was the only way to answer at all.
+fn otp_available_by_default() -> bool {
+    true
+}
+
 impl StartSessionResponse {
-    fn otp_sent(is_new_user: bool, has_passkeys: bool) -> Self {
+    fn otp_sent(is_new_user: bool, has_passkeys: bool, password: bool) -> Self {
         Self {
             public_key_options: None,
             otp_sent: true,
+            otp: true,
+            password,
             is_new_user,
             has_passkeys,
             captcha_required: None,
@@ -97,6 +127,12 @@ pub struct VerifyPasskeyRequest {
 #[derive(Deserialize)]
 pub struct VerifyOtpRequest {
     pub code: String,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyPasswordRequest {
+    pub email: String,
+    pub password: String,
 }
 
 #[derive(Deserialize)]
@@ -250,6 +286,14 @@ pub(super) async fn resolve_or_create_account(
         ));
     }
 
+    create_account(auth_state, email).await
+}
+
+/// Provision the account: the one place rows are minted, shared by the OTP
+/// path (through [`resolve_or_create_account`], which gates it on the
+/// registration policy) and the password path (which does not — a password
+/// the operator configured *is* the authorization).
+async fn create_account(auth_state: &AuthState, email: &str) -> AuthResult<AuthUser> {
     // No identity provider to issue a subject, so mint one: opaque, unique,
     // and stable for the account's life.
     let sub = crypto::generate_url_safe_token(16)
@@ -281,12 +325,48 @@ pub(super) async fn resolve_or_create_account(
 /// Send an email OTP and shape the start-session response around it.
 async fn send_otp_session(
     auth_state: &AuthState,
+    auth_config: &AuthConfig,
     session: &tower_sessions::Session,
     email: &str,
     is_new_user: bool,
 ) -> AuthResult<Json<StartSessionResponse>> {
     generate_and_send_otp(auth_state, session, email, "login").await?;
-    Ok(Json(StartSessionResponse::otp_sent(is_new_user, false)))
+    Ok(Json(StartSessionResponse::otp_sent(
+        is_new_user,
+        false,
+        auth_config.password_login,
+    )))
+}
+
+/// The start-session response for a deployment with no email sender: the
+/// password step is the only thing left to offer, and with `password_login`
+/// off there is nothing at all — which is the operator's mistake, not the
+/// caller's, so it is a 503 that says so.
+///
+/// Says nothing about the address. Without a mailer the registration gate and
+/// the captcha do not apply (the password step admits an address on the
+/// store's word alone), so `is_new_user` stays false rather than reporting
+/// whether the account exists.
+fn password_only_response(auth_config: &AuthConfig) -> AuthResult<Json<StartSessionResponse>> {
+    if !auth_config.password_login {
+        return Err(AuthError::ServiceUnavailable(
+            "This deployment has no email sender and no password login configured, so there is \
+             no way to sign in. Wire an AuthEmailSender or set AuthConfig::password_login."
+                .to_string(),
+        ));
+    }
+
+    Ok(Json(StartSessionResponse {
+        public_key_options: None,
+        otp_sent: false,
+        otp: false,
+        password: true,
+        is_new_user: false,
+        has_passkeys: false,
+        captcha_required: None,
+        captcha_server_url: None,
+        captcha_site_key: None,
+    }))
 }
 
 // ── POST /auth/session/start ────────────────────────────────────────
@@ -317,6 +397,14 @@ pub async fn start_session(
 
     let Some(user) = auth_state.user_store.get_user_by_email(&email).await? else {
         // ── Unknown address: this is a registration. ──
+
+        // With no mailer there is no code to gate, and the password step
+        // provisions the account on the store's word alone — so neither the
+        // registration gate nor the captcha has anything to guard here.
+        if auth_state.email_sender.is_none() {
+            return password_only_response(&auth_config);
+        }
+
         if !registration_allowed(&auth_state, &auth_config, &email).await? {
             info!("Registration refused for '{email}' (not permitted to register)");
             return Err(AuthError::Unauthorized(
@@ -336,6 +424,8 @@ pub async fn start_session(
             Ok(Json(StartSessionResponse {
                 public_key_options: None,
                 otp_sent: false,
+                otp: true,
+                password: auth_config.password_login,
                 is_new_user: true,
                 has_passkeys: false,
                 captcha_required: Some(true),
@@ -355,7 +445,7 @@ pub async fn start_session(
                     "No captcha configured; registration for '{email}' is gated by the allowlist alone"
                 );
             }
-            send_otp_session(&auth_state, &session, &email, true).await
+            send_otp_session(&auth_state, &auth_config, &session, &email, true).await
         };
     };
 
@@ -385,6 +475,8 @@ pub async fn start_session(
         return Ok(Json(StartSessionResponse {
             public_key_options: Some(options),
             otp_sent: false,
+            otp: auth_state.email_sender.is_some(),
+            password: auth_config.password_login,
             is_new_user: false,
             has_passkeys: true,
             captcha_required: None,
@@ -393,9 +485,13 @@ pub async fn start_session(
         }));
     }
 
-    // Existing account with no passkey: OTP is the only factor. No captcha —
-    // it gates account *creation*, and this address already has one.
-    send_otp_session(&auth_state, &session, &email, false).await
+    // Existing account with no passkey: the emailed code, or the password step
+    // when there is no mailer. No captcha — it gates account *creation*, and
+    // this address already has one.
+    if auth_state.email_sender.is_none() {
+        return password_only_response(&auth_config);
+    }
+    send_otp_session(&auth_state, &auth_config, &session, &email, false).await
 }
 
 // ── POST /auth/session/passkey/conditional/options ──────────────────
@@ -570,6 +666,84 @@ pub async fn verify_otp_handler(
     }
 }
 
+// ── POST /auth/session/password/verify ──────────────────────────────
+
+/// Verify an email + password against [`crate::AuthUserStore::verify_password`].
+///
+/// The FerrisKey router mounts this same path for the identity provider's own
+/// password flow (`session_auth::verify_password_handler`). The two routers own
+/// the same `/auth/session/*` namespace and are mounted *instead of* each
+/// other, so the path means "verify a password" on whichever one is live.
+pub async fn verify_password_handler(
+    Extension(auth_state): Extension<AuthState>,
+    Extension(auth_config): Extension<AuthConfig>,
+    session: tower_sessions::Session,
+    Json(req): Json<VerifyPasswordRequest>,
+) -> AuthResult<Json<VerifyResponse>> {
+    /// One message for a wrong password and for an address that has none:
+    /// which addresses exist is not something a login form should answer.
+    const REJECTED: &str = "Wrong email or password.";
+
+    if !auth_config.password_login {
+        return Err(AuthError::BadRequest(
+            "Password login is not enabled for this deployment".to_string(),
+        ));
+    }
+
+    let email = req.email.trim().to_lowercase();
+    if !shared::is_valid_email(&email) {
+        return Err(AuthError::Unauthorized(REJECTED.to_string()));
+    }
+    let password = req.password.trim().to_string();
+    if password.is_empty() {
+        return Err(AuthError::BadRequest("Password is required".to_string()));
+    }
+
+    // Counted before the attempt is made and under the session lock, so
+    // parallel submissions each consume a slot instead of all reading the same
+    // count — the guard the OTP attempt cap uses, and the same counter the
+    // FerrisKey password step keeps.
+    {
+        let _guard = lock_session(&session).await;
+        let attempts = session
+            .get::<u32>(PASSWORD_ATTEMPTS_KEY)
+            .await?
+            .unwrap_or(0);
+        if attempts >= MAX_PASSWORD_ATTEMPTS {
+            return Err(AuthError::Unauthorized(
+                "Too many failed password attempts. Please start a new login.".to_string(),
+            ));
+        }
+        session.insert(PASSWORD_ATTEMPTS_KEY, attempts + 1).await?;
+        persist_now(&session).await?;
+    }
+
+    if !auth_state
+        .user_store
+        .verify_password(&email, &password)
+        .await?
+    {
+        warn!("Password rejected for '{email}'");
+        return Err(AuthError::Unauthorized(REJECTED.to_string()));
+    }
+
+    session.remove::<u32>(PASSWORD_ATTEMPTS_KEY).await?;
+
+    // A password the store accepts is the operator's own say-so, so it admits
+    // the address whatever the registration policy says — and provisions the
+    // account on first login, exactly as a verified OTP does.
+    let user = match auth_state.user_store.get_user_by_email(&email).await? {
+        Some(user) => user,
+        None => {
+            info!("Password login for '{email}' with no account yet; creating one");
+            create_account(&auth_state, &email).await?
+        }
+    };
+
+    let result = finalize_login(&auth_state, &auth_config, &session, &user).await?;
+    Ok(Json(VerifyResponse::logged_in(result)))
+}
+
 // ── POST /auth/session/otp/resend ───────────────────────────────────
 
 pub async fn resend_otp_handler(
@@ -618,6 +792,7 @@ pub async fn resend_otp_handler(
 /// credential on this machine) the client asks us to switch to email OTP.
 pub async fn passkey_fallback_to_otp(
     Extension(auth_state): Extension<AuthState>,
+    Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
 ) -> AuthResult<Json<StartSessionResponse>> {
     let email = session
@@ -654,7 +829,11 @@ pub async fn passkey_fallback_to_otp(
 
     generate_and_send_otp(&auth_state, &session, &email, "login").await?;
 
-    Ok(Json(StartSessionResponse::otp_sent(false, true)))
+    Ok(Json(StartSessionResponse::otp_sent(
+        false,
+        true,
+        auth_config.password_login,
+    )))
 }
 
 // ── POST /auth/session/captcha/verify ────────────────────────────────
@@ -796,7 +975,13 @@ async fn finalize_login(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_or_create_account;
+    use super::{
+        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest,
+        resolve_or_create_account, start_session, verify_password_handler,
+    };
+    use axum::{Extension, Json};
+    use tower_sessions::{MemoryStore, Session};
+
     use crate::config::AuthConfig;
     use crate::error::{AuthError, AuthResult};
     use crate::state::AuthState;
@@ -812,6 +997,9 @@ mod tests {
     struct OneUserStore {
         user: Option<AuthUser>,
         created: Mutex<Vec<NewAuthUser>>,
+        /// The one (email, password) this store accepts, as an app with an
+        /// env-configured admin credential would.
+        password: Option<(String, String)>,
     }
 
     #[async_trait::async_trait]
@@ -850,6 +1038,12 @@ mod tests {
         async fn has_any_users(&self) -> AuthResult<bool> {
             Ok(self.user.is_some())
         }
+        async fn verify_password(&self, email: &str, password: &str) -> AuthResult<bool> {
+            Ok(self
+                .password
+                .as_ref()
+                .is_some_and(|(e, p)| e == email && p == password))
+        }
     }
 
     struct NoMail;
@@ -887,6 +1081,25 @@ mod tests {
 
     fn state(store: Arc<OneUserStore>) -> AuthState {
         AuthState::local(store, Arc::new(NoMail), Arc::new(NoPasskeys))
+    }
+
+    /// The deployment this feature exists for: an admin credential and no SMTP.
+    fn state_without_email(store: Arc<OneUserStore>) -> AuthState {
+        AuthState::local_without_email(store, Arc::new(NoPasskeys))
+    }
+
+    fn session() -> Session {
+        Session::new(None, Arc::new(MemoryStore::default()), None)
+    }
+
+    /// Registration is shut: an allowlist that names someone else, and an
+    /// account already exists so the first-run bootstrap does not apply.
+    fn closed_registration() -> AuthConfig {
+        AuthConfig {
+            password_login: true,
+            allowed_registration_emails: vec!["someone-else@example.com".to_string()],
+            ..Default::default()
+        }
     }
 
     fn existing() -> AuthUser {
@@ -958,5 +1171,152 @@ mod tests {
 
         assert!(matches!(result, Err(AuthError::Unauthorized(_))));
         assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_verified_password_signs_in_and_creates_the_account() {
+        // The operator configured this credential, so it is admitted even
+        // though the allowlist names someone else and users already exist.
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            password: Some(("admin@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+
+        let resp = verify_password_handler(
+            Extension(state_without_email(store.clone())),
+            Extension(closed_registration()),
+            session(),
+            Json(VerifyPasswordRequest {
+                email: "  Admin@example.com ".to_string(),
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await
+        .expect("a configured credential must be admitted")
+        .0;
+
+        assert!(resp.success);
+        assert_eq!(resp.redirect_url.as_deref(), Some("/dashboard"));
+        let created = store.created.lock().unwrap();
+        assert_eq!(
+            created.len(),
+            1,
+            "first password login provisions the account"
+        );
+        assert_eq!(created[0].email, "admin@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_is_401_and_creates_nothing() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            password: Some(("admin@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+
+        let result = verify_password_handler(
+            Extension(state_without_email(store.clone())),
+            Extension(closed_registration()),
+            session(),
+            Json(VerifyPasswordRequest {
+                email: "admin@example.com".to_string(),
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AuthError::Unauthorized(msg)) => assert_eq!(msg, "Wrong email or password."),
+            other => panic!("expected 401, got {:?}", other.map(|r| r.0.success)),
+        }
+        assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_address_is_rejected_with_the_same_message() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            password: Some(("admin@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+
+        let result = verify_password_handler(
+            Extension(state_without_email(store.clone())),
+            Extension(closed_registration()),
+            session(),
+            Json(VerifyPasswordRequest {
+                email: "stranger@example.com".to_string(),
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AuthError::Unauthorized(msg)) => assert_eq!(msg, "Wrong email or password."),
+            other => panic!("expected 401, got {:?}", other.map(|r| r.0.success)),
+        }
+        assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_email_sender_and_no_password_login_is_503() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+
+        let result = start_session(
+            Extension(state_without_email(store)),
+            Extension(AuthConfig::default()),
+            session(),
+            Json(StartSessionRequest {
+                email: "me@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AuthError::ServiceUnavailable(_))),
+            "a deployment with neither must say so, not fail obscurely"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_email_sender_offers_the_password_step_only() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+
+        let resp = start_session(
+            Extension(state_without_email(store)),
+            Extension(closed_registration()),
+            session(),
+            Json(StartSessionRequest {
+                email: "me@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await
+        .expect("password login is configured")
+        .0;
+
+        assert!(resp.password);
+        assert!(!resp.otp, "no sender, so no emailed code");
+        assert!(!resp.otp_sent);
+        // Says nothing about the address: the same answer for every email.
+        assert!(!resp.is_new_user);
+    }
+
+    #[test]
+    fn the_start_response_still_reads_from_the_old_shape() {
+        let old = r#"{"otp_sent":true,"is_new_user":false,"has_passkeys":false}"#;
+        let resp: StartSessionResponse = serde_json::from_str(old).unwrap();
+
+        assert!(resp.otp_sent);
+        assert!(resp.otp, "a server without the field had a sender");
+        assert!(!resp.password);
     }
 }

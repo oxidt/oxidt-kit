@@ -73,6 +73,23 @@ pub trait AuthUserStore: Send + Sync + 'static {
     async fn is_invited(&self, _email: &str) -> AuthResult<bool> {
         Ok(false)
     }
+
+    /// Whether `password` is the password for `email` (already trimmed and
+    /// lowercased).
+    ///
+    /// The default has no passwords at all. An app that does keep them must
+    /// verify with a constant-time hash comparison (dx-crypto's
+    /// `verify_secret`) and should run the comparison against a dummy hash
+    /// when the address is unknown, so timing does not reveal which addresses
+    /// exist.
+    ///
+    /// A `true` here is authorization by definition — the operator configured
+    /// that credential — so the password step admits the address whatever the
+    /// registration policy says, creating the account on first login. Return
+    /// `true` only for a credential the operator set.
+    async fn verify_password(&self, _email: &str, _password: &str) -> AuthResult<bool> {
+        Ok(false)
+    }
 }
 
 /// A stored WebAuthn credential, as the login and enrollment handlers need it.

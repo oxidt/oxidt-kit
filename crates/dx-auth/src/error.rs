@@ -16,6 +16,13 @@ pub enum AuthError {
     #[error("UserNotLoggedIn")]
     UserNotLoggedIn,
 
+    /// A login method the deployment has not configured — no email sender for
+    /// the OTP, and no password step either. The message is sent to the
+    /// client verbatim, because the fault is the operator's and a generic
+    /// "server error" gives them nothing to fix.
+    #[error("{0}")]
+    ServiceUnavailable(String),
+
     #[error("ServerStateError: {0}")]
     ServerStateError(String),
 
@@ -64,6 +71,9 @@ impl axum::response::IntoResponse for AuthError {
             AuthError::UserNotLoggedIn => {
                 (StatusCode::UNAUTHORIZED, "Not logged in").into_response()
             }
+            AuthError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, msg).into_response()
+            }
             AuthError::ServerStateError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Server configuration error",
@@ -104,6 +114,7 @@ impl AuthError {
         matches!(
             self,
             AuthError::ServerStateError(_)
+                | AuthError::ServiceUnavailable(_)
                 | AuthError::AuthSessionLayerNotFound(_)
                 | AuthError::SessionError(_)
                 | AuthError::FerrisKeyError { .. }
