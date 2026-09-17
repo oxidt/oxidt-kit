@@ -1,7 +1,9 @@
 [package]
 name = "oxidt-billing"
 description = "Provider-neutral subscription state and plan entitlements for Rust SaaS apps"
-version.workspace = true
+# Pinned ahead of the workspace version; tag and manifest must agree.
+# 0.2.0 adds `Provider::Creem`, which is a new variant on a public enum.
+version = "0.2.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

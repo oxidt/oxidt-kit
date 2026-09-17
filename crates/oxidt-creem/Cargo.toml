@@ -1,0 +1,24 @@
+[package]
+name = "oxidt-creem"
+description = "Small Creem Checkout, customer portal and signed webhook client"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+secrecy.workspace = true
+chrono.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

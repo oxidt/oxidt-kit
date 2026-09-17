@@ -2741,10 +2741,28 @@ dependencies = [
 
 [[package]]
 name = "oxidt-billing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "oxidt-creem"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

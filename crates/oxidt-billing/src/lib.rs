@@ -9,6 +9,7 @@ pub enum Provider {
     #[default]
     Polar,
     Stripe,
+    Creem,
 }
 
 /// Normalized state stored by the app after verified provider updates.

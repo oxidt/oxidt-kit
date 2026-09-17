@@ -19,13 +19,14 @@ are tagged `oxidt-*-v*`.
 | [`oxidt-billing`](crates/oxidt-billing) | provider-neutral subscription state, a small plan catalog and access/seat rules — Serde only, usable on the server and in WASM |
 | [`oxidt-stripe`](crates/oxidt-stripe) | Stripe Checkout, Billing Portal and signed-webhook client — provider HTTP and response types, no SQL or sessions |
 | [`oxidt-polar`](crates/oxidt-polar) | Polar API client and standard-webhooks verification, keyed by your own customer UUID |
+| [`oxidt-creem`](crates/oxidt-creem) | Creem Checkout, customer portal, subscription and signed-webhook client, plus the signed return URL |
 
 All are storage-agnostic: no database dependency, no ORM types in any public
 signature. `oxidt-auth` reaches storage through the `AuthUserStore`,
 `AuthEmailSender` and `AuthRateLimitStore` traits, which the host app
-implements. `oxidt-billing` is the provider-neutral core; `oxidt-stripe` and
-`oxidt-polar` are the provider clients and depend on neither the app nor each
-other.
+implements. `oxidt-billing` is the provider-neutral core; `oxidt-stripe`,
+`oxidt-polar` and `oxidt-creem` are the provider clients and depend on neither
+the app nor each other.
 
 ## Using it
 
@@ -39,9 +40,10 @@ oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-au
 oxidt-umami  = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-umami-v0.1.0" }
 oxidt-s3     = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-s3-v0.1.0" }
 oxidt-monitor = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-monitor-v0.1.0" }
-oxidt-billing = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-billing-v0.1.0" }
+oxidt-billing = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-billing-v0.2.0" }
 oxidt-stripe = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-stripe-v0.1.0" }
 oxidt-polar = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-polar-v0.1.0" }
+oxidt-creem = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-creem-v0.1.0" }
 ```
 
 `oxidt-auth` has no default features. Enable `server`, `web`, or both — apps
