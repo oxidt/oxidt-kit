@@ -26,6 +26,11 @@
 //! needs the same context, so a ciphertext copied to another row fails instead
 //! of decrypting there. The plain functions are the empty-AAD case, so their
 //! output is unchanged.
+//!
+//! The AAD is compared as raw bytes, so build it unambiguously: separate the
+//! parts with a delimiter they cannot contain, or length-prefix them. Plain
+//! concatenation (`format!("{a}{b}")`) makes `("ab", "c")` and `("a", "bc")`
+//! the same context.
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -40,6 +45,9 @@ pub const KEY_LENGTH: usize = 32;
 
 /// Length of the GCM nonce in bytes
 pub const NONCE_LENGTH: usize = 12;
+
+/// Length of the GCM authentication tag in bytes
+pub const TAG_LENGTH: usize = 16;
 
 /// Encrypt a plaintext secret using AES-256-GCM.
 ///
@@ -73,6 +81,7 @@ pub fn encrypt_secret(plaintext: &str, key: &[u8; KEY_LENGTH]) -> Result<String>
 ///
 /// `aad` is authenticated but not encrypted or stored: [`decrypt_secret_with_aad`]
 /// must be given the same bytes, or it fails as if the data were tampered with.
+/// Build it unambiguously — see the module docs.
 ///
 /// # Example
 ///
@@ -162,8 +171,9 @@ pub fn decrypt_secret_with_aad(
         .decode(encrypted)
         .map_err(|e| Error::DecryptionFailed(format!("Invalid base64: {}", e)))?;
 
-    // Ensure we have at least nonce + some ciphertext
-    if combined.len() < NONCE_LENGTH + 1 {
+    // Anything shorter than nonce + tag cannot be a valid message (an empty
+    // plaintext encrypts to exactly that).
+    if combined.len() < NONCE_LENGTH + TAG_LENGTH {
         return Err(Error::DecryptionFailed(
             "Encrypted data too short".to_string(),
         ));
@@ -422,5 +432,17 @@ mod tests {
             decrypt_secret_with_aad(&encrypted, &key, &[]).unwrap(),
             "value"
         );
+    }
+
+    #[test]
+    fn empty_plaintext_round_trips_and_shorter_input_is_rejected() {
+        let key = generate_key();
+        let encrypted = encrypt_secret("", &key).unwrap();
+        assert_eq!(decrypt_secret(&encrypted, &key).unwrap(), "");
+
+        let short =
+            base64::engine::general_purpose::STANDARD.encode([0u8; NONCE_LENGTH + TAG_LENGTH - 1]);
+        let err = decrypt_secret(&short, &key).unwrap_err();
+        assert!(err.to_string().contains("too short"), "{err}");
     }
 }
