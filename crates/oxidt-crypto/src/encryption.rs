@@ -18,10 +18,18 @@
 //! - A unique random nonce is generated for each encryption
 //! - The nonce is stored with the ciphertext (it doesn't need to be secret)
 //! - Never reuse a nonce with the same key
+//!
+//! # Associated data
+//!
+//! [`encrypt_secret_with_aad`] binds a ciphertext to context that is not
+//! stored inside it — say the row and column it belongs to. Decryption then
+//! needs the same context, so a ciphertext copied to another row fails instead
+//! of decrypting there. The plain functions are the empty-AAD case, so their
+//! output is unchanged.
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, OsRng, rand_core::RngCore},
+    aead::{Aead, OsRng, Payload, rand_core::RngCore},
 };
 use base64::Engine;
 
@@ -58,6 +66,29 @@ pub const NONCE_LENGTH: usize = 12;
 /// assert!(!encrypted.is_empty());
 /// ```
 pub fn encrypt_secret(plaintext: &str, key: &[u8; KEY_LENGTH]) -> Result<String> {
+    encrypt_secret_with_aad(plaintext, key, &[])
+}
+
+/// Encrypt like [`encrypt_secret`], binding the ciphertext to `aad`.
+///
+/// `aad` is authenticated but not encrypted or stored: [`decrypt_secret_with_aad`]
+/// must be given the same bytes, or it fails as if the data were tampered with.
+///
+/// # Example
+///
+/// ```
+/// use oxidt_crypto::encryption::{decrypt_secret_with_aad, encrypt_secret_with_aad, KEY_LENGTH};
+///
+/// let key = [0u8; KEY_LENGTH];
+/// let encrypted = encrypt_secret_with_aad("value", &key, b"row-1").unwrap();
+/// assert_eq!(decrypt_secret_with_aad(&encrypted, &key, b"row-1").unwrap(), "value");
+/// assert!(decrypt_secret_with_aad(&encrypted, &key, b"row-2").is_err());
+/// ```
+pub fn encrypt_secret_with_aad(
+    plaintext: &str,
+    key: &[u8; KEY_LENGTH],
+    aad: &[u8],
+) -> Result<String> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| Error::EncryptionFailed(format!("Failed to create cipher: {}", e)))?;
 
@@ -68,7 +99,13 @@ pub fn encrypt_secret(plaintext: &str, key: &[u8; KEY_LENGTH]) -> Result<String>
 
     // Encrypt the plaintext
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext.as_bytes())
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext.as_bytes(),
+                aad,
+            },
+        )
         .map_err(|e| Error::EncryptionFailed(format!("Encryption failed: {}", e)))?;
 
     // Combine nonce + ciphertext and encode as base64
@@ -109,6 +146,17 @@ pub fn encrypt_secret(plaintext: &str, key: &[u8; KEY_LENGTH]) -> Result<String>
 /// assert_eq!(decrypted, "my-webhook-secret");
 /// ```
 pub fn decrypt_secret(encrypted: &str, key: &[u8; KEY_LENGTH]) -> Result<String> {
+    decrypt_secret_with_aad(encrypted, key, &[])
+}
+
+/// Decrypt a value from [`encrypt_secret_with_aad`], given the same `aad`.
+///
+/// A different `aad` fails exactly like a wrong key or tampered data.
+pub fn decrypt_secret_with_aad(
+    encrypted: &str,
+    key: &[u8; KEY_LENGTH],
+    aad: &[u8],
+) -> Result<String> {
     // Decode from base64
     let combined = base64::engine::general_purpose::STANDARD
         .decode(encrypted)
@@ -132,12 +180,20 @@ pub fn decrypt_secret(encrypted: &str, key: &[u8; KEY_LENGTH]) -> Result<String>
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| Error::DecryptionFailed(format!("Failed to create cipher: {}", e)))?;
 
-    let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|e| {
-        Error::DecryptionFailed(format!(
-            "Decryption failed (wrong key or tampered data): {}",
-            e
-        ))
-    })?;
+    let plaintext = cipher
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            Error::DecryptionFailed(format!(
+                "Decryption failed (wrong key or tampered data): {}",
+                e
+            ))
+        })?;
 
     String::from_utf8(plaintext)
         .map_err(|e| Error::DecryptionFailed(format!("Invalid UTF-8 in decrypted data: {}", e)))
@@ -344,5 +400,27 @@ mod tests {
         let decrypted = decrypt_secret(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn aad_binds_the_ciphertext_to_its_context() {
+        let key = generate_key();
+        let encrypted = encrypt_secret_with_aad("value", &key, b"project-a").unwrap();
+        assert_eq!(
+            decrypt_secret_with_aad(&encrypted, &key, b"project-a").unwrap(),
+            "value"
+        );
+        assert!(decrypt_secret_with_aad(&encrypted, &key, b"project-b").is_err());
+        assert!(decrypt_secret(&encrypted, &key).is_err());
+    }
+
+    #[test]
+    fn plain_functions_are_the_empty_aad_case() {
+        let key = generate_key();
+        let encrypted = encrypt_secret("value", &key).unwrap();
+        assert_eq!(
+            decrypt_secret_with_aad(&encrypted, &key, &[]).unwrap(),
+            "value"
+        );
     }
 }

@@ -54,7 +54,10 @@ a build failure, which is the intended nudge.
 &key)` with AES-256-GCM; the 12-byte nonce is generated per message and prefixed
 to the base64 output. `generate_key()`, `encode_key()` and `parse_key()` handle
 the 32-byte key as base64 for config. Decryption validates the nonce length
-instead of panicking on a short input.
+instead of panicking on a short input. `encrypt_secret_with_aad` /
+`decrypt_secret_with_aad` additionally bind the ciphertext to associated data
+(for example the row it belongs to), so a ciphertext copied elsewhere fails to
+decrypt; the plain functions are the empty-AAD case and their output is unchanged.
 
 ## Notes
 
