@@ -1,0 +1,25 @@
+[package]
+name = "oxidt-caldav"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CalDAV/WebDAV for apps that write a user's own calendar — discovery, create-only or overwrite PUT, WebDAV folder check, VTODO/VEVENT bodies; every request through oxidt-egress"
+
+[dependencies]
+chrono = { workspace = true }
+icalendar = { version = "0.17", default-features = false }
+oxidt-egress = { path = "../oxidt-egress", features = ["client", "tokio"] }
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+] }
+roxmltree = "0.21"
+secrecy = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["time"] }
+tracing = { workspace = true }
+url = "2.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
