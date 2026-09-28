@@ -37,6 +37,13 @@ pub mod ics;
 pub use dav::{discover, put_ics, resource_url, validate_folder};
 pub use error::Error;
 
+/// The egress crate this one is built on, so an app that also calls it
+/// directly names one crate and one tag. Cargo treats each distinct git `tag`
+/// as its own source: pinning `oxidt-egress` separately builds a second copy,
+/// and [`Error::Egress`] then wraps a type the app's own `oxidt_egress` does
+/// not recognise.
+pub use oxidt_egress;
+
 use secrecy::SecretString;
 use url::Url;
 

@@ -48,9 +48,15 @@ oxidt-stripe = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-st
 oxidt-polar = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-polar-v0.1.0" }
 oxidt-creem = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-creem-v0.1.0" }
 oxidt-egress = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-egress-v0.1.0" }
-oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.0" }
+oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
 oxidt-mcp-oauth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-oauth-v0.1.0" }
 ```
+
+`oxidt-egress` is for apps that need only egress. An app using both depends on
+`oxidt-caldav` alone and reaches egress as `oxidt_caldav::oxidt_egress`: each
+distinct git `tag` is a separate cargo source, so pinning both crates with
+their own tags builds two copies of `oxidt-egress`, and
+`oxidt_caldav::Error::Egress` wraps a type the app's copy does not recognise.
 
 `oxidt-auth` has no default features. Enable `server`, `web`, or both — apps
 normally propagate both. Add `passkey-rp` to act as your own WebAuthn Relying

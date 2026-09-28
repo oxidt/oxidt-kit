@@ -6,8 +6,13 @@ Every request goes through [`oxidt-egress`](../oxidt-egress).
 
 ```toml
 [dependencies]
-oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.0" }
+oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
 ```
+
+An app that also calls egress directly depends on `oxidt-caldav` only and
+reaches it as `oxidt_caldav::oxidt_egress`. Cargo treats each distinct git
+`tag` as its own source, so pinning `oxidt-egress` with its own tag builds a
+second copy, and `Error::Egress` then wraps a type the app cannot match on.
 
 ## Why
 
