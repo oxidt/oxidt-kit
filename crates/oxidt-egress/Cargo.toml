@@ -1,0 +1,28 @@
+[package]
+name = "oxidt-egress"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Outbound HTTP to user-supplied URLs without becoming a proxy into the private network — https-only URL policy, address checks, DNS pinning, manual redirects"
+
+[features]
+default = ["client"]
+# A reqwest client pinned to the checked addresses.
+client = ["dep:reqwest"]
+# `guard_host_async`, resolving through tokio instead of blocking the thread.
+tokio = ["dep:tokio"]
+
+[dependencies]
+# rustls with the aws-lc-rs provider and the platform verifier — the same
+# build the rest of the kit uses, so an app carries one HTTP stack, not two.
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+], optional = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["net"], optional = true }
+url = "2.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net"] }
