@@ -35,3 +35,7 @@ jobs:
         run: cargo check -p oxidt-auth --features server
       - name: oxidt-umami client bridge on the target it actually ships to
         run: cargo check -p oxidt-umami --target wasm32-unknown-unknown
+      - name: oxidt-egress checks only (no reqwest, the shape a consumer on another reqwest uses)
+        run: cargo clippy -p oxidt-egress --no-default-features --all-targets -- -D warnings
+      - name: oxidt-egress async guard without the client
+        run: cargo clippy -p oxidt-egress --no-default-features --features tokio --all-targets -- -D warnings

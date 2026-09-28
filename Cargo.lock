@@ -2013,6 +2013,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "icalendar"
+version = "0.17.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fda1b791865374063fa57e84adfe3823c2d5cd5968d721533be4556a24cffd8"
+dependencies = [
+ "chrono",
+ "iso8601",
+ "uuid",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2164,6 +2175,15 @@ name = "ipnet"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
+
+[[package]]
+name = "iso8601"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ffd3254cf2b0fc53e38414bdba99719f3e269db8a6519731b68a3a90040c41b"
+dependencies = [
+ "nom",
+]
 
 [[package]]
 name = "itoa"
@@ -2748,6 +2768,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidt-caldav"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "icalendar",
+ "oxidt-egress",
+ "reqwest 0.13.4",
+ "roxmltree",
+ "secrecy",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "oxidt-creem"
 version = "0.1.0"
 dependencies = [
@@ -2775,6 +2811,27 @@ dependencies = [
  "rand 0.9.5",
  "sha2",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oxidt-egress"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "oxidt-mcp-oauth"
+version = "0.1.0"
+dependencies = [
+ "oxidt-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
@@ -4492,6 +4549,7 @@ version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]
