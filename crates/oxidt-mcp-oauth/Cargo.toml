@@ -1,0 +1,16 @@
+[package]
+name = "oxidt-mcp-oauth"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The OAuth 2.1 authorization-server core for an MCP endpoint — discovery metadata, dynamic client registration, PKCE authorization code and the validation rules, without storage, sessions or a consent page"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = "2.5"
+# PKCE S256 verification, constant-time. Not reimplemented here.
+oxidt-crypto = { path = "../oxidt-crypto", version = "0.1" }
