@@ -108,7 +108,18 @@ impl Client {
     /// Test-mode keys only work against the test host, and production keys only
     /// against the production host; the two environments share no data.
     pub fn new(api_key: SecretString, test_mode: bool) -> Result<Self, Error> {
-        if api_key.expose_secret().is_empty() {
+        let base_url = if test_mode {
+            "https://test-api.creem.io/v1"
+        } else {
+            "https://api.creem.io/v1"
+        };
+        Self::with_base_url(api_key, base_url)
+    }
+
+    /// Point the client at another host, such as a mock server in tests.
+    /// `base_url` includes the version prefix, e.g. `https://api.creem.io/v1`.
+    pub fn with_base_url(api_key: SecretString, base_url: &str) -> Result<Self, Error> {
+        if api_key.expose_secret().is_empty() || base_url.is_empty() {
             return Err(Error::Configuration);
         }
         let http = reqwest::Client::builder()
@@ -116,15 +127,10 @@ impl Client {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(Error::Transport)?;
-        let host = if test_mode {
-            "https://test-api.creem.io"
-        } else {
-            "https://api.creem.io"
-        };
         Ok(Self {
             http,
             api_key,
-            base_url: format!("{host}/v1"),
+            base_url: base_url.trim_end_matches('/').to_owned(),
         })
     }
 
@@ -370,12 +376,17 @@ pub struct Subscription {
     /// Absent from webhook payloads; present when fetched from the API.
     #[serde(default)]
     pub items: Vec<SubscriptionItem>,
+    /// The last paid transaction; changes on every renewal.
+    #[serde(default)]
+    pub last_transaction_id: Option<String>,
     #[serde(default)]
     pub current_period_start_date: Option<String>,
     #[serde(default)]
     pub current_period_end_date: Option<String>,
     #[serde(default)]
     pub canceled_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// `test`, `prod`, `sandbox`, or `local` for webhook samples.
@@ -428,6 +439,9 @@ pub struct Product {
     pub name: Option<String>,
     #[serde(default)]
     pub price: Option<i64>,
+    /// Uppercase ISO 4217 code, e.g. `USD`.
+    #[serde(default)]
+    pub currency: Option<String>,
     #[serde(default)]
     pub billing_period: Option<String>,
 }
@@ -450,11 +464,36 @@ pub struct CompletedCheckout {
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
+    pub product: Option<Expandable<Product>>,
+    /// Present once paid; the only record of a one-time purchase.
+    #[serde(default)]
+    pub order: Option<Order>,
+    #[serde(default)]
     pub subscription: Option<Expandable<Subscription>>,
     #[serde(default)]
     pub customer: Option<Expandable<Customer>>,
     #[serde(default)]
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// `amount` is in cents, `currency` uppercase ISO 4217; `status` is `pending`,
+/// `paid`, … Kept a string so a new one is not a parse error.
+#[derive(Debug, Deserialize)]
+pub struct Order {
+    pub id: String,
+    pub product: Expandable<Product>,
+    #[serde(default)]
+    pub customer: Option<Expandable<Customer>>,
+    #[serde(default)]
+    pub transaction: Option<String>,
+    #[serde(default)]
+    pub amount: Option<i64>,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,7 +662,10 @@ mod tests {
             "id": "sub_1",
             "object": "subscription",
             "status": "active",
-            "product": {"id": "prod_1", "name": "Monthly", "price": 1000, "billing_period": "every-month"},
+            "product": {
+                "id": "prod_1", "name": "Monthly", "price": 1000,
+                "currency": "EUR", "billing_period": "every-month"
+            },
             "customer": {"id": "cust_1", "object": "customer", "email": "a@b.test"},
             "items": [{
                 "object": "subscription_item",
@@ -632,17 +674,17 @@ mod tests {
                 "price_id": "pprice_1",
                 "units": 1
             }],
+            "last_transaction_id": "tran_1",
             "current_period_start_date": "2024-10-12T11:58:38.000Z",
             "current_period_end_date": "2024-11-12T11:58:38.000Z",
             "canceled_at": null,
+            "created_at": "2024-09-12T11:58:38.000Z",
             "mode": "prod"
         })
     }
 
     async fn client(server: &MockServer) -> Client {
-        let mut client = Client::new("creem_test_key".into(), true).unwrap();
-        client.base_url = server.uri();
-        client
+        Client::with_base_url("creem_test_key".into(), &format!("{}/", server.uri())).unwrap()
     }
 
     #[tokio::test]
@@ -756,6 +798,12 @@ mod tests {
         assert_eq!(sub.customer_id(), "cust_1");
         assert_eq!(sub.period_end_ms(), Some(1_731_412_718_000));
         assert_eq!(sub.product.object().unwrap().price, Some(1000));
+        assert_eq!(
+            sub.product.object().unwrap().currency.as_deref(),
+            Some("EUR")
+        );
+        assert_eq!(sub.last_transaction_id.as_deref(), Some("tran_1"));
+        assert_eq!(sub.created_at.as_deref(), Some("2024-09-12T11:58:38.000Z"));
 
         let mut canceled = subscription_json();
         canceled["status"] = "canceled".into();
@@ -903,6 +951,78 @@ mod tests {
         assert_eq!(checkout.status.as_deref(), Some("completed"));
         assert_eq!(checkout.request_id.as_deref(), Some("org_1"));
         assert_eq!(checkout.subscription.unwrap().object().unwrap().id, "sub_1");
+        assert!(checkout.order.is_none());
+    }
+
+    /// A one-time checkout carries no subscription; the order is the purchase.
+    #[tokio::test]
+    async fn one_time_checkouts_expose_the_order_and_product() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/checkouts"))
+            .and(query_param("checkout_id", "ch_2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ch_2",
+                "object": "checkout",
+                "status": "completed",
+                "product": {"id": "prod_2", "price": 4900, "currency": "USD"},
+                "order": {
+                    "id": "ord_1",
+                    "object": "order",
+                    "customer": "cust_1",
+                    "product": "prod_2",
+                    "transaction": "tran_2",
+                    "amount": 4900,
+                    "currency": "USD",
+                    "status": "paid",
+                    "type": "onetime",
+                    "created_at": "2024-10-12T11:58:38.000Z"
+                },
+                "customer": "cust_1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let checkout = client.checkout_session("ch_2").await.unwrap();
+        assert!(checkout.subscription.is_none());
+        let product = checkout.product.unwrap();
+        assert_eq!(product.object().unwrap().currency.as_deref(), Some("USD"));
+        let order = checkout.order.unwrap();
+        assert_eq!(order.id, "ord_1");
+        assert!(matches!(&order.product, Expandable::Id(id) if id == "prod_2"));
+        assert!(matches!(&order.customer, Some(Expandable::Id(id)) if id == "cust_1"));
+        assert_eq!(order.transaction.as_deref(), Some("tran_2"));
+        assert_eq!(order.amount, Some(4900));
+        assert_eq!(order.currency.as_deref(), Some("USD"));
+        assert_eq!(order.status.as_deref(), Some("paid"));
+        assert_eq!(
+            order.created_at.as_deref(),
+            Some("2024-10-12T11:58:38.000Z")
+        );
+    }
+
+    #[test]
+    fn base_url_defaults_by_mode_and_can_be_overridden() {
+        let debug = |c: Client| format!("{c:?}");
+        assert!(
+            debug(Client::new("k".into(), true).unwrap()).contains("https://test-api.creem.io/v1")
+        );
+        assert!(
+            debug(Client::new("k".into(), false).unwrap()).contains("\"https://api.creem.io/v1\"")
+        );
+        assert!(
+            debug(Client::with_base_url("k".into(), "http://127.0.0.1:1/v1/").unwrap())
+                .contains("\"http://127.0.0.1:1/v1\"")
+        );
+        assert!(matches!(
+            Client::with_base_url("k".into(), ""),
+            Err(Error::Configuration)
+        ));
+        assert!(matches!(
+            Client::with_base_url("".into(), "http://127.0.0.1:1"),
+            Err(Error::Configuration)
+        ));
     }
 
     #[tokio::test]
