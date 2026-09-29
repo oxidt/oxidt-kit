@@ -78,7 +78,13 @@ name = "oxidt-auth"
 # password login is off too. `AuthConfig` gains a required field.
 # 0.11.1 stops mailing an OTP at `/auth/session/start` while `password_login`
 # is on: the page asks for one through the passkey-fallback path instead.
-version = "0.12.0"
+# 0.12.0 negotiates the login locale (cookie, then Accept-Language) and ships
+# German login copy.
+# 0.13.0 adds `ferriskey::delete_user`, so an app's account deletion can remove
+# the FerrisKey user (and with it the passwords and passkeys) too. `Ok(false)`
+# means FerrisKey answered 404, already gone. The service account needs
+# `manage_users` in the realm. Additive.
+version = "0.13.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

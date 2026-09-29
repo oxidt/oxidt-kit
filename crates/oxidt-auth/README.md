@@ -9,7 +9,7 @@ code. FerrisKey is the identity provider; the login screen is yours.
 
 ```toml
 [dependencies]
-oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.12.0", features = ["server"] }
+oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.13.0", features = ["server"] }
 ```
 
 No default features. Enable `server` (Axum handlers, FerrisKey client, session
@@ -171,7 +171,7 @@ Party, and — opt-in — a password step. It implies `passkey-rp`, so the app s
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
 ```toml
-auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.12.0", optional = true }
+auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.13.0", optional = true }
 
 [features]
 server = ["auth/server", "auth/local-login", ...]
@@ -271,6 +271,16 @@ The page leaves a few optional styling hooks for the host stylesheet:
 them. Because the page lives in a git dependency, Tailwind cannot scan its
 classes — keep a safelist file in the app (dx-admin's `safelist-oxidt-auth.html`
 is one) and add it as an `@source`.
+
+## Deleting the IdP account
+
+`ferriskey::delete_user(base, realm, service_token, user_id)` deletes a FerrisKey
+user, credentials included, for an app's own account-deletion flow. Get the
+token with `ferriskey::service_account_token` using the app's client
+credentials; the `user_id` is the `sub` of a FerrisKey login. It returns
+`Ok(true)` when deleted and `Ok(false)` on a 404 (already gone), so a retry is
+safe. The client's service account needs a role with the `manage_users`
+permission in the realm, or FerrisKey answers 403.
 
 ## Security notes
 

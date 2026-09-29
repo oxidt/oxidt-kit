@@ -475,6 +475,34 @@ pub async fn delete_user_credential(
     empty_or_error(resp, "delete_user_credential").await
 }
 
+/// Delete a user from the realm: `DELETE /realms/{realm}/users/{user_id}`.
+/// FerrisKey removes the user's credentials (passwords, passkeys) with it.
+///
+/// Returns `Ok(true)` when the user was deleted and `Ok(false)` when FerrisKey
+/// answered 404, i.e. the user was already gone, so a retried deletion is not
+/// an error. Any other non-2xx is a `FerrisKeyError`. The service account needs
+/// the `manage_users` (or `manage_realm`) permission in the realm; without it
+/// FerrisKey answers 403.
+pub async fn delete_user(
+    base: &str,
+    realm: &str,
+    service_token: &str,
+    user_id: &str,
+) -> AuthResult<bool> {
+    let url = realm_url(base, realm, &format!("/users/{user_id}"));
+    let resp = http()
+        .delete(&url)
+        .bearer_auth(service_token)
+        .send()
+        .await?;
+    if resp.status() == StatusCode::NOT_FOUND {
+        info!("FerrisKey user {} already deleted", user_id);
+        return Ok(false);
+    }
+    empty_or_error(resp, "delete_user").await?;
+    Ok(true)
+}
+
 // ── Passkey registration (login-actions, Bearer = temp_token) ───────
 
 /// Fetch WebAuthn creation options for registering a new passkey on the
@@ -676,6 +704,67 @@ mod tests {
             pkce_challenge(flow.code_verifier.as_deref().unwrap())
         );
         assert_eq!(q["code_challenge_method"], "S256");
+    }
+
+    /// Serve one canned response on a localhost socket and hand back the
+    /// request head it received.
+    fn one_shot_server(status: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                head.push(byte[0]);
+            }
+            let body = r#"{"count":1}"#;
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            tx.send(String::from_utf8(head).unwrap()).unwrap();
+        });
+        (base, rx)
+    }
+
+    #[tokio::test]
+    async fn delete_user_sends_an_authenticated_delete_for_the_user() {
+        let (base, rx) = one_shot_server("200 OK");
+        assert!(
+            delete_user(&base, "oxidt", "svc-token", "u-1")
+                .await
+                .unwrap()
+        );
+        let head = rx.recv().unwrap().to_lowercase();
+        assert!(head.starts_with("delete /realms/oxidt/users/u-1 http/1.1\r\n"));
+        assert!(head.contains("authorization: bearer svc-token\r\n"));
+    }
+
+    #[tokio::test]
+    async fn delete_user_treats_not_found_as_already_gone() {
+        let (base, _rx) = one_shot_server("404 Not Found");
+        assert!(
+            !delete_user(&base, "oxidt", "svc-token", "u-1")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_user_surfaces_any_other_failure() {
+        let (base, _rx) = one_shot_server("403 Forbidden");
+        let err = delete_user(&base, "oxidt", "svc-token", "u-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AuthError::FerrisKeyError { status, .. } if status == StatusCode::FORBIDDEN
+        ));
     }
 
     #[test]
