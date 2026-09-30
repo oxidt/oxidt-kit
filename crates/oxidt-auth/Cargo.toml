@@ -84,7 +84,9 @@ name = "oxidt-auth"
 # the FerrisKey user (and with it the passwords and passkeys) too. `Ok(false)`
 # means FerrisKey answered 404, already gone. The service account needs
 # `manage_users` in the realm. Additive.
-version = "0.13.0"
+# 0.13.1 tags the login email field for autofill and the email keyboard
+# (autocomplete, inputmode, no autocapitalize/spellcheck). Markup only.
+version = "0.13.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
