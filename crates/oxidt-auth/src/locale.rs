@@ -53,7 +53,7 @@ impl Locale {
         }
         best.1
     }
-    #[cfg(feature = "server")]
+    #[cfg(feature = "axum")]
     pub fn from_headers(headers: &axum::http::HeaderMap) -> Self {
         Self::negotiate(
             headers
@@ -76,7 +76,11 @@ pub fn current() -> Locale {
 }
 #[cfg(any(feature = "server", feature = "web"))]
 pub fn tr(text: &str) -> String {
-    if current() == Locale::En {
+    tr_in(current(), text)
+}
+/// [`tr`] for an explicit locale, for renderers without the Dioxus context.
+pub fn tr_in(locale: Locale, text: &str) -> String {
+    if locale == Locale::En {
         return text.to_owned();
     }
     static CATALOG: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =

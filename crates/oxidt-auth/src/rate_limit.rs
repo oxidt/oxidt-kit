@@ -152,6 +152,22 @@ fn rate_limit_key(
 
 /// Axum middleware that enforces per-IP rate limiting.
 ///
+/// The socket peer: axum's `ConnectInfo`, or the `RemoteAddr` Topcoat's server
+/// sets when the router is mounted there. Without either, every client would
+/// share the one `peer:unknown` bucket.
+fn peer_addr(extensions: &axum::http::Extensions) -> Option<SocketAddr> {
+    let connect_info = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+    #[cfg(feature = "topcoat")]
+    let connect_info = connect_info.or_else(|| {
+        extensions
+            .get::<::topcoat::router::RemoteAddr>()
+            .map(|addr| addr.0)
+    });
+    connect_info
+}
+
 /// Returns `429 Too Many Requests` when the limit is exceeded.
 pub async fn rate_limit_middleware(
     Extension(limiter): Extension<AuthRateLimiter>,
@@ -162,10 +178,7 @@ pub async fn rate_limit_middleware(
 ) -> Response {
     let key = rate_limit_key(
         request.headers(),
-        request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| *addr),
+        peer_addr(request.extensions()),
         config.trust_proxy_headers,
     );
 
@@ -192,6 +205,16 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    #[cfg(feature = "topcoat")]
+    #[test]
+    fn keys_topcoat_requests_by_their_peer() {
+        let peer: SocketAddr = "203.0.113.7:12345".parse().unwrap();
+        let mut extensions = axum::http::Extensions::new();
+        extensions.insert(::topcoat::router::RemoteAddr(peer));
+
+        assert_eq!(peer_addr(&extensions), Some(peer));
+    }
 
     #[test]
     fn ignores_forwarded_headers_unless_trusted() {

@@ -33,6 +33,10 @@ jobs:
         run: cargo clippy -p oxidt-auth --features local-login,web --all-targets -- -D warnings
       - name: oxidt-auth server-only (no web)
         run: cargo check -p oxidt-auth --features server
+      - name: oxidt-auth axum without Dioxus
+        run: cargo clippy -p oxidt-auth --features local-login --all-targets -- -D warnings
+      - name: oxidt-auth for Topcoat apps
+        run: cargo clippy -p oxidt-auth --features topcoat,local-login --all-targets -- -D warnings
       - name: oxidt-umami client bridge on the target it actually ships to
         run: cargo check -p oxidt-umami --target wasm32-unknown-unknown
       - name: oxidt-egress checks only (no reqwest, the shape a consumer on another reqwest uses)

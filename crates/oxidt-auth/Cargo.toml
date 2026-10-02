@@ -86,7 +86,12 @@ name = "oxidt-auth"
 # `manage_users` in the realm. Additive.
 # 0.13.1 tags the login email field for autofill and the email keyboard
 # (autocomplete, inputmode, no autocapitalize/spellcheck). Markup only.
-version = "0.13.1"
+# 0.14.0 splits the Axum side out of `server` as `axum`, which builds without
+# Dioxus, and adds `topcoat`: `topcoat::user_session` for Topcoat pages and,
+# with `local-login`, `topcoat::local_login_page`.
+# `server` keeps its meaning. Breaking only for `passkey-rp` / `local-login`
+# without `server` or `web`: they no longer pull in Dioxus or the login pages.
+version = "0.14.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -142,6 +147,7 @@ ciborium = { version = "0.2", optional = true }
 
 # Web dependencies (login page component)
 dioxus = { version = "0.7.10", features = ["fullstack", "lib"], optional = true }
+topcoat = { version = "0.9", default-features = false, features = ["router", "view"], optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Request",
@@ -162,14 +168,21 @@ subtle = "2.6.1"
 # store, the way concurrent requests carrying one cookie do in production.
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 tokio = { version = "1", features = ["macros", "rt"] }
+# The Topcoat test serves the auth session through a real Topcoat router.
+topcoat = { version = "0.9", default-features = false, features = ["router", "tower", "view"] }
 
 [features]
 default = []
 server = [
+    "axum",
     "dep:dioxus",
     # The dev-login availability server function expands to `dioxus_server`
     # registration under this feature, so it has to be on here too.
     "dioxus/server",
+]
+# The server side without Dioxus: Axum handlers, FerrisKey client, session and
+# rate-limit machinery. `server` is this plus the SSR'd login pages.
+axum = [
     "dep:async-trait",
     "dep:axum",
     "dep:tower-sessions",
@@ -190,13 +203,16 @@ server = [
 # no IdP user JWT and so can never enroll through the IdP's own endpoints.
 #
 # Additive, not an alternative: seggwat runs this alongside FerrisKey login.
-# Requires `server`, and an `AuthPasskeyStore` on `AuthState`.
-passkey-rp = ["server", "dep:ring", "dep:ciborium"]
+# Requires `axum`, and an `AuthPasskeyStore` on `AuthState`.
+passkey-rp = ["axum", "dep:ring", "dep:ciborium"]
 # Self-owned login: email OTP + passkeys, no identity provider. The app is its
 # own Relying Party (implies `passkey-rp`) and mounts `local_auth_router` in
 # place of `auth_router`. Additive at the crate level — the FerrisKey flow still
 # compiles — but the two routers own the same paths, so an app mounts one.
 local-login = ["passkey-rp"]
+# Read the login state from Topcoat pages (`topcoat::user_session`). Topcoat
+# mounts `auth_router` as a tower service; no Dioxus involved.
+topcoat = ["axum", "dep:topcoat"]
 web = [
     "dep:dioxus",
     "dep:web-sys",

@@ -30,6 +30,15 @@ impl UserSession {
     pub fn data(self) -> Result<LoggedInData, AuthError> {
         self.data.ok_or(AuthError::UserNotLoggedIn)
     }
+
+    /// Read the login state from a request's `tower_sessions::Session`.
+    pub(crate) async fn from_session(session: &tower_sessions::Session) -> Result<Self, AuthError> {
+        let data: Option<LoggedInData> = session
+            .get::<LoggedInData>(LOGGED_IN_USER_SESSION_KEY)
+            .await?;
+
+        Ok(Self { data })
+    }
 }
 
 impl<S> axum::extract::FromRequestParts<S> for UserSession
@@ -47,10 +56,6 @@ where
                 "Auth Session Layer not found".to_string(),
             ))?;
 
-        let data: Option<LoggedInData> = session
-            .get::<LoggedInData>(LOGGED_IN_USER_SESSION_KEY)
-            .await?;
-
-        Ok(Self { data })
+        Self::from_session(&session).await
     }
 }

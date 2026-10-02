@@ -18,40 +18,40 @@ pub use config::AuthConfig;
 pub use error::{AuthError, AuthResult};
 pub use types::UserDataRefreshTrigger;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod traits;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod state;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use state::AuthState;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use traits::{AuthEmailSender, AuthRateLimitStore, AuthUserStore};
 
 #[cfg(feature = "passkey-rp")]
 pub use traits::{AuthPasskeyStore, NewPasskey, StoredPasskey};
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod jwt;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use jwt::JwksCache;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod ferriskey;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod session;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod handlers;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod csrf;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub mod rate_limit;
 
 /// WebAuthn Relying Party — ceremony options, and registration/assertion
@@ -61,20 +61,23 @@ pub mod rate_limit;
 /// crate, so it can be reasoned about (and tested) as pure protocol code.
 #[cfg(feature = "passkey-rp")]
 pub mod webauthn;
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use rate_limit::AUTH_REQUESTS_PER_MINUTE;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 mod router;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use router::auth_router;
 
 #[cfg(feature = "local-login")]
 pub use router::local_auth_router;
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 pub use session::{LoggedInData, UserSession, login};
+
+#[cfg(feature = "topcoat")]
+pub mod topcoat;
 
 #[cfg(feature = "web")]
 pub mod webauthn_helpers;
@@ -93,10 +96,10 @@ pub use login_page::LoginPage;
 
 /// The login page for the self-owned flow (`local-login`). Compiled for the
 /// wasm client (`web`) and, for SSR, the server that mounts the local router.
-#[cfg(any(feature = "web", feature = "local-login"))]
+#[cfg(any(feature = "web", all(feature = "local-login", feature = "server")))]
 mod local_login_page;
 
-#[cfg(any(feature = "web", feature = "local-login"))]
+#[cfg(any(feature = "web", all(feature = "local-login", feature = "server")))]
 pub use local_login_page::LocalLoginPage;
 
 pub mod locale;

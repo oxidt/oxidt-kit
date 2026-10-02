@@ -29,20 +29,20 @@ pub enum AuthError {
     #[error("AuthSessionLayerNotFound: {0}")]
     AuthSessionLayerNotFound(String),
 
-    #[cfg(feature = "server")]
+    #[cfg(feature = "axum")]
     #[error("SessionError: {0}")]
     SessionError(#[from] tower_sessions::session::Error),
 
     /// Non-2xx response from FerrisKey. Carries the HTTP status and a body
     /// snippet for tracing.
-    #[cfg(feature = "server")]
+    #[cfg(feature = "axum")]
     #[error("FerrisKeyError: {status} — {body}")]
     FerrisKeyError {
         status: reqwest::StatusCode,
         body: String,
     },
 
-    #[cfg(feature = "server")]
+    #[cfg(feature = "axum")]
     #[error("ReqwestError: {0}")]
     ReqwestError(#[from] reqwest::Error),
 
@@ -50,7 +50,7 @@ pub enum AuthError {
     SerdeError(#[from] serde_json::Error),
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 impl axum::response::IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
         use reqwest::StatusCode;
@@ -106,7 +106,7 @@ impl axum::response::IntoResponse for AuthError {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "axum")]
 impl AuthError {
     /// Returns true for server-side errors that should be reported to Sentry.
     /// Client/auth errors (bad credentials, expired sessions) are expected and not actionable.

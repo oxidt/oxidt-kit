@@ -9,12 +9,15 @@ code. FerrisKey is the identity provider; the login screen is yours.
 
 ```toml
 [dependencies]
-oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.13.0", features = ["server"] }
+oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.14.0", features = ["server"] }
 ```
 
 No default features. Enable `server` (Axum handlers, FerrisKey client, session
 and rate-limit machinery), `web` (WASM passkey helpers), or both — a fullstack
 app normally propagates both, and that union is what CI gates on.
+
+Not on Dioxus? `axum` is `server` without Dioxus and the login pages, and
+`topcoat` adds the [Topcoat](#topcoat) adapter on top of it.
 
 ## Storage stays in your app
 
@@ -171,7 +174,7 @@ Party, and — opt-in — a password step. It implies `passkey-rp`, so the app s
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
 ```toml
-auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.13.0", optional = true }
+auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.14.0", optional = true }
 
 [features]
 server = ["auth/server", "auth/local-login", ...]
@@ -365,3 +368,39 @@ passkey autofill or enrollment offer.
 ## License
 
 MIT — see [LICENSE](../../LICENSE).
+
+## Topcoat
+
+With the `topcoat` feature, mount the router as a tower service and wrap the
+whole Topcoat router in your `SessionManagerLayer`, so pages and the auth
+handlers share one session:
+
+```rust
+use topcoat::router::{Router, tower::{TowerLayer, TowerRoute}};
+
+let router = Router::builder()
+    .route(TowerRoute::any("/auth/{*rest}", auth_router(config, state)))
+    .layer(TowerLayer::new(session_manager_layer))
+    .build();
+```
+
+Read the session in a page or route:
+
+```rust
+let user = oxidt_auth::topcoat::user_session(cx).await?.data()?;
+```
+
+With `local-login` too, render the login page as a component (mount
+`local_auth_router` instead of `auth_router`):
+
+```rust
+view! {
+    local_login_page(redirect_url: "/dashboard", app_name: Some("Acme".to_owned()))
+}
+```
+
+It is server-rendered with the same steps as the Dioxus `LocalLoginPage`
+(OTP, passkey autofill and modal, password, terms, passkey offer) and an
+inlined script drives them, so a strict CSP needs to allow inline scripts.
+Styling is the same Tailwind + DaisyUI classes, so point Tailwind's scan at
+this crate's `src/topcoat/` as you would for the Dioxus pages.
