@@ -39,7 +39,7 @@ Depend on a tag, not a branch — the tag *is* the version:
 [dependencies]
 oxidt-crypto = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-crypto-v0.1.0" }
 oxidt-smtp   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-smtp-v0.1.0" }
-oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.14.0" }
+oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.14.1" }
 oxidt-umami  = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-umami-v0.1.0" }
 oxidt-s3     = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-s3-v0.1.0" }
 oxidt-monitor = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-monitor-v0.1.0" }

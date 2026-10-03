@@ -67,6 +67,12 @@ pub struct StartSessionRequest {
     pub redirect_url: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+pub struct ConditionalOptionsRequest {
+    #[serde(default)]
+    pub redirect_url: Option<String>,
+}
+
 /// Deserialize as well as Serialize, and every added field defaults, so a
 /// client built against an older shape still parses this one.
 #[derive(Serialize, Deserialize)]
@@ -517,14 +523,31 @@ pub async fn start_session(
 /// offers whatever resident keys it holds for this RP. The challenge is parked
 /// in the session **without** a user binding — `verify_passkey_handler`
 /// resolves the account from the asserted credential instead.
+///
+/// The body is optional: `{ "redirect_url": "/…" }` parks the destination the
+/// way `start_session` does, since this flow never reaches that endpoint.
 pub async fn passkey_conditional_options(
     Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
+    body: axum::body::Bytes,
 ) -> AuthResult<Json<serde_json::Value>> {
     if !PASSKEY_LOGIN_ENABLED {
         return Err(AuthError::BadRequest(
             "Passkey login is disabled".to_string(),
         ));
+    }
+    let req: ConditionalOptionsRequest = if body.is_empty() {
+        ConditionalOptionsRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| AuthError::BadRequest(format!("Invalid request body: {e}")))?
+    };
+    if let Some(ref url) = req.redirect_url
+        && shared::is_safe_redirect_url(url)
+    {
+        session
+            .insert(shared::LOGIN_REDIRECT_URL_SESSION_KEY, url)
+            .await?;
     }
     let rp = relying_party(&auth_config)?;
     let challenge = crate::webauthn::generate_challenge()
@@ -1000,8 +1023,9 @@ async fn finalize_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest, passkey_fallback_to_otp,
-        resolve_or_create_account, start_session, verify_password_handler,
+        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest,
+        passkey_conditional_options, passkey_fallback_to_otp, resolve_or_create_account,
+        start_session, verify_password_handler,
     };
     use axum::{Extension, Json};
     use tower_sessions::{MemoryStore, Session};
@@ -1413,6 +1437,50 @@ mod tests {
 
         assert!(resp.otp_sent);
         assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn autofill_options_park_the_page_redirect() {
+        let config = AuthConfig {
+            base_url: "https://app.example.com".to_string(),
+            ..Default::default()
+        };
+        let parked = session();
+
+        let _ = passkey_conditional_options(
+            Extension(config.clone()),
+            parked.clone(),
+            r#"{"redirect_url":"/billing"}"#.into(),
+        )
+        .await
+        .expect("options are issued");
+        assert_eq!(
+            parked
+                .get::<String>(crate::handlers::shared::LOGIN_REDIRECT_URL_SESSION_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("/billing"),
+        );
+
+        // The Dioxus page posts no body; an off-site target is never parked.
+        for body in ["", r#"{"redirect_url":"//evil.example"}"#] {
+            let session = session();
+            let _ = passkey_conditional_options(
+                Extension(config.clone()),
+                session.clone(),
+                body.into(),
+            )
+            .await
+            .expect("options are issued");
+            assert!(
+                session
+                    .get::<String>(crate::handlers::shared::LOGIN_REDIRECT_URL_SESSION_KEY)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

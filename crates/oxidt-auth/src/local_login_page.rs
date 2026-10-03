@@ -145,6 +145,13 @@ pub fn LocalLoginPage(
     // settings-page enrollment.
     #[cfg(feature = "web")]
     use_drop(crate::webauthn_helpers::abort_conditional_passkey_now);
+    // Autofill and the passkey button never reach `/auth/session/start`, so
+    // they hand the server this page's destination with their options request.
+    #[cfg(feature = "web")]
+    let conditional_body = (!redirect_url.is_empty())
+        .then(|| serde_json::json!({ "redirect_url": redirect_url.clone() }));
+    #[cfg(feature = "web")]
+    let passkey_body = conditional_body.clone();
     #[cfg(feature = "web")]
     use_effect(use_reactive!(|step| {
         // `use_reactive!` closures don't take `mut` params — rebind.
@@ -170,10 +177,11 @@ pub fn LocalLoginPage(
         // or log the session in on a stale challenge.
         let attempt = *passkey_attempt.peek();
         let stale = move || *passkey_attempt.peek() != attempt;
+        let body = conditional_body.clone();
         spawn(async move {
             let outcome: Result<(), String> = async {
                 let opts: OptionsResp =
-                    wasm_post_json("/auth/session/passkey/conditional/options", None).await?;
+                    wasm_post_json("/auth/session/passkey/conditional/options", body).await?;
                 // A modal ceremony may have started while the options were in
                 // flight (button click, email submit). Its abort found nothing
                 // to abort yet, so starting the browser request now would be
@@ -554,6 +562,8 @@ pub fn LocalLoginPage(
     // ceremony rejection, and carries the same generation guard.
     let on_passkey_button = move |_| {
         #[cfg(feature = "web")]
+        let body = passkey_body.clone();
+        #[cfg(feature = "web")]
         spawn(async move {
             error_msg.set(None);
             email_error.set(None);
@@ -571,7 +581,7 @@ pub fn LocalLoginPage(
             let stale = move || *passkey_attempt.peek() != attempt;
             let outcome: Result<(), String> = async {
                 let opts: OptionsResp =
-                    wasm_post_json("/auth/session/passkey/conditional/options", None).await?;
+                    wasm_post_json("/auth/session/passkey/conditional/options", body).await?;
                 let assertion =
                     crate::webauthn_helpers::browser_get_passkey(&opts.options.to_string()).await?;
                 if stale() {

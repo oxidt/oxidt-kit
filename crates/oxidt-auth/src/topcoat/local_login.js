@@ -30,8 +30,9 @@
   let attempt = 0;
   let condRunning = false;
   let condDisabled = false;
-  let condAbort = null;
-  let condPending = null;
+  // The one WebAuthn get() in flight (modal or autofill): its abort handle and
+  // a promise that settles once the browser has released it.
+  let ceremony = null;
 
   // ── UI state ──────────────────────────────────────────────────────
 
@@ -144,23 +145,53 @@
     };
   }
 
-  async function getPasskey(raw) {
-    if (!navigator.credentials || !navigator.credentials.get) {
-      throw new Error("Passkeys are not supported in this browser or context.");
-    }
+  // Run one get() in the ceremony slot, replacing whatever held it. A ceremony
+  // gone stale while the previous one was released never starts.
+  async function runCeremony(request, stale) {
+    await cancelCeremony();
+    if (stale()) throw new Error("ceremony-aborted");
+    const controller = new AbortController();
+    let release;
+    const mine = { controller, done: new Promise((r) => (release = r)) };
+    ceremony = mine;
     try {
-      const c = await navigator.credentials.get({ publicKey: requestOptions(raw, false) });
-      return assertionJson(c);
+      return assertionJson(await navigator.credentials.get({ ...request, signal: controller.signal }));
     } catch (e) {
       throw new Error(
-        e.name === "NotAllowedError"
-          ? "Authentication was cancelled or timed out."
-          : "Passkey error: " + e.message,
+        e.name === "AbortError"
+          ? "ceremony-aborted"
+          : e.name === "NotAllowedError"
+            ? "Authentication was cancelled or timed out."
+            : "Passkey error: " + e.message,
       );
+    } finally {
+      if (ceremony === mine) ceremony = null;
+      release();
     }
   }
 
-  async function getPasskeyConditional(raw) {
+  function cancelCeremonyNow() {
+    if (ceremony) ceremony.controller.abort();
+  }
+
+  // Abort the running ceremony and wait (up to ~2s) until the browser has
+  // released it: a request issued before that is rejected with "A request is
+  // already pending".
+  async function cancelCeremony() {
+    const current = ceremony;
+    if (!current) return;
+    current.controller.abort();
+    await Promise.race([current.done, sleep(2000)]);
+  }
+
+  async function getPasskey(raw, stale) {
+    if (!navigator.credentials || !navigator.credentials.get) {
+      throw new Error("Passkeys are not supported in this browser or context.");
+    }
+    return runCeremony({ publicKey: requestOptions(raw, false) }, stale);
+  }
+
+  async function getPasskeyConditional(raw, stale) {
     if (
       !window.PublicKeyCredential ||
       !PublicKeyCredential.isConditionalMediationAvailable ||
@@ -168,46 +199,18 @@
     ) {
       throw new Error("conditional-unsupported");
     }
-    abortConditionalNow();
-    const controller = new AbortController();
-    condAbort = controller;
-    let release;
-    const pending = new Promise((r) => (release = r));
-    condPending = pending;
-    try {
-      const c = await navigator.credentials.get({
-        publicKey: requestOptions(raw, true),
-        mediation: "conditional",
-        signal: controller.signal,
-      });
-      return assertionJson(c);
-    } catch (e) {
-      throw new Error(
-        e.name === "AbortError"
-          ? "conditional-aborted"
-          : e.name === "NotAllowedError"
-            ? "Authentication was cancelled or timed out."
-            : "Passkey error: " + e.message,
-      );
-    } finally {
-      if (condAbort === controller) condAbort = null;
-      if (condPending === pending) condPending = null;
-      release();
-    }
+    return runCeremony({ publicKey: requestOptions(raw, true), mediation: "conditional" }, stale);
   }
 
-  function abortConditionalNow() {
-    if (condAbort) condAbort.abort();
-    condAbort = null;
-  }
+  // Autofill and the email-free button never reach `/auth/session/start`, so
+  // they hand the server the page's destination here.
+  const conditionalOptions = () =>
+    postJson("/auth/session/passkey/conditional/options", redirectUrl ? { redirect_url: redirectUrl } : {});
 
-  // Abort the parked autofill ceremony and wait (up to ~2s) until the browser
-  // has released it: a modal request issued before that is rejected with
-  // "A request is already pending".
-  async function abortConditional() {
-    const pending = condPending;
-    abortConditionalNow();
-    if (pending) await Promise.race([pending, sleep(2000)]);
+  // "Use email code instead" only where it can work: an address is known and
+  // the server can mail a code.
+  function offerCode(on) {
+    $$('[data-action="use-code"]').forEach((b) => (b.hidden = !on));
   }
 
   async function createPasskey(raw) {
@@ -365,9 +368,9 @@
     const mine = attempt;
     const stale = () => attempt !== mine;
     try {
-      const opts = await postJson("/auth/session/passkey/conditional/options");
+      const opts = await conditionalOptions();
       if (stale()) return;
-      const assertion = await getPasskeyConditional(opts.options);
+      const assertion = await getPasskeyConditional(opts.options, stale);
       if (stale()) return;
       show("verifying");
       const resp = await postJson("/auth/session/passkey/verify", {
@@ -382,7 +385,7 @@
       }
     } catch (e) {
       // Aborted is expected on email submit; anything else means stop retrying.
-      if (e.message !== "conditional-aborted") condDisabled = true;
+      if (e.message !== "ceremony-aborted" && !stale()) condDisabled = true;
     } finally {
       condRunning = false;
     }
@@ -399,7 +402,7 @@
     const mine = ++attempt;
     const stale = () => attempt !== mine;
     try {
-      const assertion = await getPasskey(passkeyOptions);
+      const assertion = await getPasskey(passkeyOptions, stale);
       if (stale()) return;
       show("verifying");
       const resp = await postJson("/auth/session/passkey/verify", {
@@ -431,12 +434,12 @@
     email = value;
     $$("[data-email]").forEach((el) => (el.textContent = value));
     try {
-      await abortConditional();
+      await cancelCeremony();
       const body = { email: value };
       if (redirectUrl) body.redirect_url = redirectUrl;
       const resp = await postJson("/auth/session/start", body);
       $("[data-new-user]").hidden = !resp.is_new_user;
-      $('[data-action="use-code"][data-otp-only]').hidden = resp.otp === false;
+      offerCode(resp.otp !== false);
       if (resp.captcha_required === true) {
         await completeCaptcha();
       } else if (resp.public_key_options) {
@@ -512,14 +515,14 @@
       // Discoverable modal ceremony: the resident key names the account.
       showError(null);
       emailError(null);
-      attempt++;
-      show("passkey");
-      await abortConditional();
-      const mine = attempt;
+      const mine = ++attempt;
       const stale = () => attempt !== mine;
+      offerCode(false);
+      show("passkey");
       try {
-        const opts = await postJson("/auth/session/passkey/conditional/options");
-        const assertion = await getPasskey(opts.options);
+        const opts = await conditionalOptions();
+        if (stale()) return;
+        const assertion = await getPasskey(opts.options, stale);
         if (stale()) return;
         show("verifying");
         const resp = await postJson("/auth/session/passkey/verify", {
@@ -539,6 +542,7 @@
       setLoading(true);
       clearAlerts();
       try {
+        await cancelCeremony();
         await postJson("/auth/session/passkey-fallback-otp");
         showSuccess("Verification code sent to your email.");
         $('[name="password"]').value = "";
@@ -562,9 +566,11 @@
       }
       setLoading(false);
     },
-    "passkey-back"() {
+    async "passkey-back"() {
       attempt++;
       clearAlerts();
+      // Released before `show` re-arms autofill, or that request is refused.
+      await cancelCeremony();
       setLoading(false);
       show("email");
     },
@@ -626,7 +632,7 @@
   $('[name="email"]').addEventListener("input", () => emailError(null));
   $("[data-tos-check]").addEventListener("change", updateTerms);
   // Leaving the page must not leave a parked ceremony blocking the document.
-  window.addEventListener("pagehide", abortConditionalNow);
+  window.addEventListener("pagehide", cancelCeremonyNow);
 
   if (webauthn) $("[data-webauthn]").hidden = false;
   // The form ships disabled, so a submit before this script ran can't fall

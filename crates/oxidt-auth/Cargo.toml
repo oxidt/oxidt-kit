@@ -91,7 +91,10 @@ name = "oxidt-auth"
 # with `local-login`, `topcoat::local_login_page`.
 # `server` keeps its meaning. Breaking only for `passkey-rp` / `local-login`
 # without `server` or `web`: they no longer pull in Dioxus or the login pages.
-version = "0.14.0"
+# 0.14.1 fixes the Topcoat login page: passkey prompts are cancellable, email-
+# free passkey sign-in keeps `redirect_url` (both pages), and "use email code
+# instead" shows only where a code can be sent. Additive.
+version = "0.14.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

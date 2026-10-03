@@ -203,7 +203,7 @@ pub async fn local_login_page(
                             </form>
                             <div class="flex justify-between items-center text-sm">
                                 <button type="button" data-action="back" class="btn btn-ghost btn-sm text-base-content/50">(t("Back"))</button>
-                                <button type="button" data-action="use-code" data-otp-only="" class="btn btn-ghost btn-sm text-primary">(t("Email me a code instead"))</button>
+                                <button type="button" data-action="use-code" class="btn btn-ghost btn-sm text-primary">(t("Email me a code instead"))</button>
                             </div>
                         </div>
 
