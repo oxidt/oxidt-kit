@@ -94,7 +94,10 @@ name = "oxidt-auth"
 # 0.14.1 fixes the Topcoat login page: passkey prompts are cancellable, email-
 # free passkey sign-in keeps `redirect_url` (both pages), and "use email code
 # instead" shows only where a code can be sent. Additive.
-version = "0.14.1"
+# 0.15.0 accepts FerrisKey passkey success responses with `login_url` and
+# updates the Topcoat adapter to 0.10. Breaking for Topcoat consumers: use
+# Topcoat 0.10 so the adapter and application share the same context types.
+version = "0.15.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -150,7 +153,7 @@ ciborium = { version = "0.2", optional = true }
 
 # Web dependencies (login page component)
 dioxus = { version = "0.7.10", features = ["fullstack", "lib"], optional = true }
-topcoat = { version = "0.9", default-features = false, features = ["router", "view"], optional = true }
+topcoat = { version = "0.10.0", default-features = false, features = ["router", "view"], optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Request",
@@ -172,7 +175,7 @@ subtle = "2.6.1"
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 # The Topcoat test serves the auth session through a real Topcoat router.
-topcoat = { version = "0.9", default-features = false, features = ["router", "tower", "view"] }
+topcoat = { version = "0.10.0", default-features = false, features = ["router", "tower", "view"] }
 
 [features]
 default = []
