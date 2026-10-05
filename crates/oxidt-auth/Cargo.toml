@@ -86,7 +86,8 @@ name = "oxidt-auth"
 # `manage_users` in the realm. Additive.
 # 0.13.1 tags the login email field for autofill and the email keyboard
 # (autocomplete, inputmode, no autocapitalize/spellcheck). Markup only.
-version = "0.13.1"
+# 0.13.2 accepts FerrisKey passkey success responses with `login_url`.
+version = "0.13.2"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
