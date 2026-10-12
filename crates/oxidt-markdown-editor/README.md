@@ -8,6 +8,17 @@ The underlying value is always Markdown. Images and tables remain source text.
 Enable only the framework you use. No framework is enabled by default.
 Both wrappers bundle the same checked-in JavaScript; consumers do not need Bun.
 
+## Slash commands
+
+Type `/` at the start of an empty line to open the command menu. Keep typing
+to filter, use Up/Down and Enter to choose, or click an option. Escape dismisses
+the menu and leaves the typed text intact. Commands also stay literal in code
+blocks. Inserting a command is one undo step and updates the form value normally.
+
+Commands: `/heading-1`, `/heading-2`, `/heading-3`, `/bullet-list`,
+`/numbered-list`, `/task-list`, `/quote`, and `/code`. The code command inserts
+a fenced block with the cursor inside it.
+
 ## Topcoat
 
 ```rust,ignore

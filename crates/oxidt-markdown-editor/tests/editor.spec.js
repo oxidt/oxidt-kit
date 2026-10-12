@@ -87,3 +87,69 @@ test('without the module, the textarea remains a working form field', async ({ p
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     expect(await page.evaluate(() => window.submits)).toBe(1);
 });
+
+for (const [command, markdown] of [
+    ['heading-1', '# '], ['heading-2', '## '], ['heading-3', '### '],
+    ['bullet-list', '- '], ['numbered-list', '1. '], ['task-list', '- [ ] '],
+    ['quote', '> '], ['code', '```\n\n```'],
+]) test(`slash command /${command} inserts Markdown`, async ({ page }) => {
+    await write(page, '/' + command);
+    await expect(page.getByRole('option')).toHaveCount(1);
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue(markdown);
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await page.keyboard.insertText('Text');
+    await expect(source(page)).toHaveValue(command === 'code' ? '```\nText\n```' : markdown + 'Text');
+    expect(await page.evaluate(() => new FormData(document.querySelector('form')).get('body')))
+        .toBe(await source(page).inputValue());
+});
+
+test('slash menu filters, supports arrow keys, and undoes one insertion', async ({ page }) => {
+    await write(page, '/');
+    await expect(page.getByRole('option')).toHaveCount(8);
+    await page.keyboard.insertText('heading');
+    await expect(page.getByRole('option')).toHaveCount(3);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue('## ');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(source(page)).toHaveValue('/heading');
+});
+
+test('slash commands support clicking and Escape leaves the source intact', async ({ page }) => {
+    await write(page, '/');
+    await page.getByRole('option', { name: '/quote', exact: false }).click();
+    await expect(source(page)).toHaveValue('> ');
+    await expect(field(page)).toBeFocused();
+    await write(page, '/heading-1');
+    await expect(page.getByRole('listbox')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(source(page)).toHaveValue('/heading-1');
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue('/heading-1\n');
+});
+
+test('ordinary slashes, unknown commands, and code or HTML stay literal', async ({ page }) => {
+    for (const text of ['Text /heading-1', 'https://example.com/', '/unknown', '```\n/heading-1', '    /heading-1', '<div>\n/heading-1']) {
+        await write(page, text);
+        // Completion sources run asynchronously after typing.
+        await page.waitForTimeout(200);
+        await expect(page.getByRole('listbox')).toHaveCount(0);
+        await expect(source(page)).toHaveValue(text);
+    }
+});
+
+test('slash insertion respects maxlength and a field becoming readonly', async ({ page }) => {
+    await source(page).evaluate(el => { el.maxLength = 5; });
+    await write(page, '/code');
+    await expect(page.getByRole('listbox')).toBeVisible();
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue('/code');
+    await source(page).evaluate(el => { el.maxLength = 100; el.readOnly = true; });
+    await expect(field(page)).toHaveAttribute('contenteditable', 'false');
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue('/code');
+});

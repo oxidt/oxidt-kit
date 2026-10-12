@@ -4,6 +4,8 @@ import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirr
 import { syntaxTree } from "@codemirror/language";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, TaskList } from "@lezer/markdown";
+import { autocompletion } from "@codemirror/autocomplete";
+import { slashCommands } from "./slash-commands.js";
 
 class Bullet extends WidgetType {
     toDOM() {
@@ -128,6 +130,11 @@ const theme = EditorView.theme({
     ".md-inline-code": { borderRadius: "0.25rem" },
     ".md-code-line": { padding: "0 0.5rem" },
     ".md-bullet": { display: "inline-block", width: "0.7em", textAlign: "center", color: "var(--md-editor-accent, var(--color-primary, #146ade))" },
+    ".cm-tooltip-autocomplete": { fontFamily: "inherit", backgroundColor: "var(--md-editor-background, var(--color-base-100, #fff))", color: "var(--md-editor-color, var(--color-base-content, #202936))", border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", borderRadius: "0.5rem", overflow: "hidden", boxShadow: "0 4px 16px #0002" },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "inherit", maxHeight: "min(20rem, 50vh)" },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul > li": { padding: "0.35rem 0.65rem", lineHeight: "1.5" },
+    ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))", color: "var(--md-editor-color, var(--color-base-content, #202936))" },
+    ".cm-completionDetail": { fontStyle: "normal", opacity: "0.65", marginLeft: "1rem" },
 });
 
 export function mountEditor(textarea, host) {
@@ -141,6 +148,7 @@ export function mountEditor(textarea, host) {
         extensions: [
             markdown({ base: commonmarkLanguage, extensions: [Strikethrough, Table, TaskList] }),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(editable()),
+            autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
             EditorView.lineWrapping, theme, livePreview, placeholder(textarea.placeholder),
             EditorView.contentAttributes.of({ "aria-label": textarea.getAttribute("aria-label") || "Markdown", "aria-multiline": "true", spellcheck: "true" }),
             EditorState.transactionFilter.of(transaction => {
