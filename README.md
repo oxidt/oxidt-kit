@@ -10,6 +10,7 @@ are tagged `oxidt-*-v*`.
 
 | crate | what it is |
 |---|---|
+| [`oxidt-markdown-editor`](crates/oxidt-markdown-editor) | live Markdown writing field with optional Topcoat and Dioxus components |
 | [`oxidt-crypto`](crates/oxidt-crypto) | secure random, Argon2 hashing, SHA-256 lookup hashes, API-key / CSRF / invitation tokens, PKCE `S256`, AES-256-GCM at rest |
 | [`oxidt-smtp`](crates/oxidt-smtp) | Lettre-backed SMTP — pooled sync/async clients with retry and timeouts, plus a one-shot per-tenant sender |
 | [`oxidt-auth`](crates/oxidt-auth) | FerrisKey OIDC, custom login UI (passkey / password / email-OTP), sessions, CSRF, rate limiting, and an optional self-owned WebAuthn Relying Party |

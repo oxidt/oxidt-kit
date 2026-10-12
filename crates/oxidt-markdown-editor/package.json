@@ -1,0 +1,21 @@
+{
+  "name": "oxidt-markdown-editor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:editor": "bun scripts/build-editor.js",
+    "test:editor": "bun test scripts/markdown-editor.test.js",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.14",
+    "@lezer/markdown": "^1.8.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
+  }
+}

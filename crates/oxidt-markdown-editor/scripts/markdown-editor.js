@@ -1,0 +1,229 @@
+import { Compartment, EditorState } from "@codemirror/state";
+import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder } from "@codemirror/view";
+import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
+import { syntaxTree } from "@codemirror/language";
+import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
+import { Strikethrough, Table, TaskList } from "@lezer/markdown";
+
+class Bullet extends WidgetType {
+    toDOM() {
+        const span = document.createElement("span");
+        span.className = "md-bullet";
+        span.textContent = "•";
+        return span;
+    }
+    ignoreEvent() { return false; }
+}
+
+// Decorations only change presentation. The document, clipboard, undo history,
+// and form value always contain the original Markdown.
+export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.length }]) {
+    const result = [];
+    const active = focused ? state.selection.ranges.map(range => ({
+        from: state.doc.lineAt(range.from).from,
+        to: state.doc.lineAt(range.to).to,
+    })) : [];
+    const editing = (from, to) => active.some(range => from <= range.to && to >= range.from);
+    const mark = (from, to, className) => {
+        if (from < to) result.push(Decoration.mark({ class: className }).range(from, to));
+    };
+    const hide = (from, to) => {
+        // View plugins cannot replace line breaks. Multiline syntax remains
+        // editable, with only the characters on inactive lines hidden.
+        for (let pos = from; pos < to;) {
+            const line = state.doc.lineAt(pos);
+            const end = Math.min(line.to, to);
+            if (pos < end && !editing(pos, end)) result.push(Decoration.replace({}).range(pos, end));
+            pos = line.to + 1;
+        }
+    };
+    const lineClasses = new Map();
+    const lines = (from, to, className) => {
+        for (let pos = state.doc.lineAt(from).from; pos <= to;) {
+            const classes = lineClasses.get(pos) || new Set();
+            classes.add(className);
+            lineClasses.set(pos, classes);
+            pos = state.doc.lineAt(pos).to + 1;
+        }
+    };
+    // The syntax tree handles escapes, nested emphasis, and code correctly;
+    // regexes over the document would also format Markdown inside code fences.
+    const visited = new Set();
+    for (const range of ranges) syntaxTree(state).iterate({
+        from: range.from, to: range.to,
+        enter(ref) {
+            const { node, name, from, to } = ref;
+            const id = name + ":" + from;
+            if (visited.has(id)) return false;
+            visited.add(id);
+            if (name === "Image" || name === "HTMLBlock" || name === "HTMLTag") return false;
+            if (/^ATXHeading[1-6]$/.test(name)) {
+                lines(from, to, "md-h" + name.slice(-1));
+                const opening = node.firstChild;
+                hide(opening.from, Math.min(opening.to + 1, to));
+                const closing = node.lastChild;
+                if (closing.from !== opening.from && closing.name === "HeaderMark") hide(closing.from, closing.to);
+            } else if (name === "StrongEmphasis" || name === "Emphasis" || name === "Strikethrough" || name === "InlineCode") {
+                mark(from, to, { StrongEmphasis: "md-strong", Emphasis: "md-em", Strikethrough: "md-strike", InlineCode: "md-inline-code" }[name]);
+                hide(node.firstChild.from, node.firstChild.to);
+                hide(node.lastChild.from, node.lastChild.to);
+                if (name === "InlineCode") return false;
+            } else if (name === "Link") {
+                mark(from, to, "md-link");
+                if (!editing(from, to)) {
+                    hide(from, from + 1);
+                    for (let child = node.firstChild?.nextSibling; child; child = child.nextSibling) {
+                        if (child.name === "LinkMark" && state.sliceDoc(child.from, child.to) === "]") {
+                            hide(child.from, to);
+                            break;
+                        }
+                    }
+                }
+            } else if (name === "ListMark") {
+                if (node.parent?.parent?.name === "BulletList" && !editing(from, to)) {
+                    result.push(Decoration.replace({ widget: new Bullet() }).range(from, to));
+                }
+            } else if (name === "FencedCode" || name === "CodeBlock") {
+                lines(from, to, "md-code-line");
+                for (let child = node.firstChild; child; child = child.nextSibling) {
+                    if (child.name === "CodeMark" || child.name === "CodeInfo") hide(child.from, child.to);
+                }
+                return false;
+            }
+        },
+    });
+    for (const [pos, classes] of lineClasses) {
+        result.push(Decoration.line({ class: [...classes].join(" ") }).range(pos));
+    }
+    return Decoration.set(result, true);
+}
+
+const livePreview = ViewPlugin.fromClass(class {
+    constructor(view) { this.decorations = decorations(view.state, view.hasFocus, view.visibleRanges); }
+    update(update) {
+        if (update.docChanged || update.selectionSet || update.viewportChanged || update.focusChanged ||
+            syntaxTree(update.startState) !== syntaxTree(update.state)) {
+            this.decorations = decorations(update.state, update.view.hasFocus, update.view.visibleRanges);
+        }
+    }
+}, { decorations: plugin => plugin.decorations });
+
+const theme = EditorView.theme({
+    "&": { backgroundColor: "var(--md-editor-background, var(--color-base-100, #fff))", color: "var(--md-editor-color, var(--color-base-content, #202936))", border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", borderRadius: "0.75rem" },
+    "&.cm-focused": { outline: "2px solid var(--md-editor-accent, var(--color-primary, #146ade))", outlineOffset: "2px" },
+    ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.75", overflowX: "auto" },
+    ".cm-content": { padding: "1rem", minHeight: "var(--md-editor-min-height, 20rem)", caretColor: "var(--md-editor-color, var(--color-base-content, #202936))" },
+    ".cm-line": { padding: "0" },
+    ".cm-cursor": { borderLeftColor: "var(--md-editor-color, var(--color-base-content, #202936))" },
+    ".cm-placeholder": { color: "color-mix(in srgb, var(--md-editor-color, var(--color-base-content, #202936)) 45%, transparent)" },
+    ".md-h1": { fontSize: "2em", fontWeight: "700", lineHeight: "1.4" },
+    ".md-h2": { fontSize: "1.6em", fontWeight: "700", lineHeight: "1.45" },
+    ".md-h3": { fontSize: "1.3em", fontWeight: "650" },
+    ".md-h4, .md-h5, .md-h6": { fontWeight: "650" },
+    ".md-strong": { fontWeight: "700" },
+    ".md-em": { fontStyle: "italic" },
+    ".md-strike": { textDecoration: "line-through" },
+    ".md-link": { color: "var(--md-editor-accent, var(--color-primary, #146ade))", textDecoration: "underline", textUnderlineOffset: "3px" },
+    ".md-inline-code, .md-code-line": { fontFamily: "ui-monospace, monospace", backgroundColor: "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))", fontSize: "0.9em" },
+    ".md-inline-code": { borderRadius: "0.25rem" },
+    ".md-code-line": { padding: "0 0.5rem" },
+    ".md-bullet": { display: "inline-block", width: "0.7em", textAlign: "center", color: "var(--md-editor-accent, var(--color-primary, #146ade))" },
+});
+
+export function mountEditor(textarea, host) {
+    const controls = new Compartment();
+    let notifying = true;
+    const editable = () => [EditorState.readOnly.of(textarea.disabled || textarea.readOnly), EditorView.editable.of(!textarea.disabled && !textarea.readOnly)];
+    const view = new EditorView({
+        parent: host,
+        doc: textarea.value,
+        selection: { anchor: textarea.selectionStart, head: textarea.selectionEnd },
+        extensions: [
+            markdown({ base: commonmarkLanguage, extensions: [Strikethrough, Table, TaskList] }),
+            history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(editable()),
+            EditorView.lineWrapping, theme, livePreview, placeholder(textarea.placeholder),
+            EditorView.contentAttributes.of({ "aria-label": textarea.getAttribute("aria-label") || "Markdown", "aria-multiline": "true", spellcheck: "true" }),
+            EditorState.transactionFilter.of(transaction => {
+                const limit = textarea.maxLength;
+                return transaction.isUserEvent("input") && limit >= 0 && transaction.newDoc.length > limit &&
+                    transaction.newDoc.length > transaction.startState.doc.length ? [] : transaction;
+            }),
+            EditorView.updateListener.of(update => {
+                const selection = update.state.selection.main;
+                if (update.docChanged) textarea.value = update.state.doc.toString();
+                textarea.setSelectionRange(selection.from, selection.to);
+                if (update.docChanged && notifying) textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            }),
+        ],
+    });
+    const hadFocus = document.activeElement === textarea;
+    const wasHidden = textarea.hidden;
+    host.hidden = wasHidden;
+    textarea.hidden = true;
+    if (hadFocus) view.focus();
+    const observer = new MutationObserver(() => view.dispatch({ effects: controls.reconfigure(editable()) }));
+    observer.observe(textarea, { attributes: true, attributeFilter: ["disabled", "readonly"] });
+    const focus = event => { event.preventDefault(); view.focus(); };
+    textarea.addEventListener("invalid", focus);
+    const labels = [...textarea.labels];
+    labels.forEach(label => label.addEventListener("click", focus));
+    const api = {
+        setValue(value, notify = true) {
+            notifying = notify;
+            try {
+                if (value !== view.state.doc.toString()) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value }, annotations: isolateHistory.of("full") });
+            } finally { notifying = true; }
+        },
+        insert(at, text) {
+            if (textarea.disabled || textarea.readOnly) return;
+            view.dispatch({ changes: { from: at, insert: text }, selection: { anchor: at + text.length }, scrollIntoView: true, userEvent: "input.paste", annotations: isolateHistory.of("full") });
+            view.focus();
+        },
+        positionAt(event) { return view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head; },
+        show(visible) { host.hidden = !visible; if (visible) view.focus(); },
+        destroy() {
+            observer.disconnect();
+            clearTimeout(resetTimer);
+            form?.removeEventListener("reset", reset);
+            textarea.removeEventListener("invalid", focus);
+            labels.forEach(label => label.removeEventListener("click", focus));
+            view.destroy();
+            textarea.hidden = wasHidden;
+        },
+    };
+    let resetTimer;
+    const form = textarea.form;
+    const reset = () => { resetTimer = setTimeout(() => api.setValue(textarea.value), 0); };
+    form?.addEventListener("reset", reset);
+    return api;
+}
+
+// Explicit host children keep framework-owned nodes separate from CodeMirror's
+// DOM. Disconnect cleanup also covers Dioxus navigation and Topcoat fragments.
+if (typeof customElements !== "undefined" && !customElements.get("oxidt-markdown-editor")) {
+    customElements.define("oxidt-markdown-editor", class extends HTMLElement {
+        static observedAttributes = ["data-value"];
+        connectedCallback() {
+            queueMicrotask(() => {
+                if (!this.isConnected || this.editor) return;
+                const textarea = this.querySelector("textarea");
+                const host = this.querySelector("[data-editor-host]");
+                if (!textarea || !host) return;
+                this.style.display = "block";
+                this.style.minWidth = "0";
+                if (this.hasAttribute("data-value")) textarea.value = this.getAttribute("data-value");
+                this.editor = mountEditor(textarea, host);
+            });
+        }
+        attributeChangedCallback(name, before, value) {
+            if (before !== value && value !== null) this.editor?.setValue(value, false);
+        }
+        disconnectedCallback() {
+            queueMicrotask(() => {
+                if (this.isConnected) return;
+                this.editor?.destroy();
+                this.editor = null;
+            });
+        }
+    });
+}

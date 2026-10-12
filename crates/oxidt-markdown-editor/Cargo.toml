@@ -1,0 +1,18 @@
+[package]
+name = "oxidt-markdown-editor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/oxidt/oxidt-kit"
+description = "Live Markdown writing field with Topcoat and Dioxus components"
+readme = "README.md"
+include = ["src/**", "assets/**", "README.md", "LICENSE", "Cargo.toml"]
+
+[features]
+default = []
+topcoat = ["dep:topcoat"]
+dioxus = ["dep:dioxus"]
+
+[dependencies]
+topcoat = { version = "=0.10.0", default-features = false, features = ["view", "asset"], optional = true }
+dioxus = { version = "0.7.10", default-features = false, features = ["macro", "html", "signals", "document", "asset"], optional = true }
