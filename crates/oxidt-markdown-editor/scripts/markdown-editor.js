@@ -1,4 +1,4 @@
-import { Compartment, EditorState } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
@@ -17,14 +17,58 @@ class Bullet extends WidgetType {
     ignoreEvent() { return false; }
 }
 
+class ImageWidget extends WidgetType {
+    constructor(src, alt) { super(); this.src = src; this.alt = alt; }
+    eq(other) { return other.src === this.src && other.alt === this.alt; }
+    toDOM() {
+        const img = document.createElement("img");
+        img.className = "md-image";
+        img.src = this.src;
+        img.alt = this.alt;
+        return img;
+    }
+    ignoreEvent() { return false; }
+}
+
+// Cells show their source text; inline formatting inside a cell is not rendered.
+class TableWidget extends WidgetType {
+    constructor(rows, source) { super(); this.rows = rows; this.source = source; }
+    eq(other) { return other.source === this.source; }
+    toDOM(view) {
+        const table = document.createElement("table");
+        table.className = "md-table";
+        this.rows.forEach((cells, index) => {
+            const row = table.insertRow();
+            for (const text of cells) {
+                const cell = document.createElement(index === 0 ? "th" : "td");
+                cell.textContent = text;
+                row.append(cell);
+            }
+        });
+        // Clicking the table moves the cursor into it, which reveals the source.
+        table.addEventListener("mousedown", event => {
+            event.preventDefault();
+            const from = view.posAtDOM(table);
+            view.dispatch({ selection: { anchor: from } });
+            view.focus();
+        });
+        return table;
+    }
+    ignoreEvent() { return true; }
+}
+
+function activeLines(state, focused) {
+    return focused ? state.selection.ranges.map(range => ({
+        from: state.doc.lineAt(range.from).from,
+        to: state.doc.lineAt(range.to).to,
+    })) : [];
+}
+
 // Decorations only change presentation. The document, clipboard, undo history,
 // and form value always contain the original Markdown.
 export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.length }]) {
     const result = [];
-    const active = focused ? state.selection.ranges.map(range => ({
-        from: state.doc.lineAt(range.from).from,
-        to: state.doc.lineAt(range.to).to,
-    })) : [];
+    const active = activeLines(state, focused);
     const editing = (from, to) => active.some(range => from <= range.to && to >= range.from);
     const mark = (from, to, className) => {
         if (from < to) result.push(Decoration.mark({ class: className }).range(from, to));
@@ -56,9 +100,20 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
         enter(ref) {
             const { node, name, from, to } = ref;
             const id = name + ":" + from;
-            if (visited.has(id)) return false;
+            // Ranges overlap at shared ancestors such as Document; skip only the
+            // repeat decoration so later ranges still reach their own children.
+            if (visited.has(id)) return;
             visited.add(id);
-            if (name === "Image" || name === "HTMLBlock" || name === "HTMLTag") return false;
+            if (name === "Image") {
+                const url = node.getChild("URL");
+                const close = node.getChildren("LinkMark").find(mark => state.sliceDoc(mark.from, mark.to) === "]");
+                if (url && close && !editing(from, to)) {
+                    const alt = state.sliceDoc(from + 2, close.from);
+                    result.push(Decoration.replace({ widget: new ImageWidget(state.sliceDoc(url.from, url.to), alt) }).range(from, to));
+                }
+                return false;
+            }
+            if (name === "HTMLBlock" || name === "HTMLTag" || name === "Table") return false;
             if (/^ATXHeading[1-6]$/.test(name)) {
                 lines(from, to, "md-h" + name.slice(-1));
                 const opening = node.firstChild;
@@ -100,6 +155,51 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
     return Decoration.set(result, true);
 }
 
+// Block widgets may span line breaks, which view plugins cannot replace, so
+// tables come from a state field. Focus is mirrored into state for the same rule.
+const setFocus = StateEffect.define();
+const focusState = StateField.define({
+    create: () => false,
+    update(value, transaction) {
+        for (const effect of transaction.effects) if (effect.is(setFocus)) value = effect.value;
+        return value;
+    },
+});
+
+export function tables(state, focused) {
+    const result = [];
+    const active = activeLines(state, focused);
+    syntaxTree(state).iterate({
+        enter({ node, name, from, to }) {
+            if (name !== "Table") return;
+            const start = state.doc.lineAt(from).from;
+            const end = state.doc.lineAt(state.sliceDoc(to - 1, to) === "\n" ? to - 1 : to).to;
+            if (active.some(range => start <= range.to && end >= range.from)) return false;
+            const rows = [];
+            for (let row = node.firstChild; row; row = row.nextSibling) {
+                if (row.name !== "TableHeader" && row.name !== "TableRow") continue;
+                rows.push(row.getChildren("TableCell").map(cell => state.sliceDoc(cell.from, cell.to).trim()));
+            }
+            result.push(Decoration.replace({ widget: new TableWidget(rows, state.sliceDoc(start, end)), block: true }).range(start, end));
+            return false;
+        },
+    });
+    return Decoration.set(result);
+}
+
+const tablePreview = StateField.define({
+    create: state => tables(state, false),
+    update(value, transaction) {
+        const focused = transaction.state.field(focusState);
+        if (transaction.docChanged || transaction.selection || focused !== transaction.startState.field(focusState) ||
+            syntaxTree(transaction.startState) !== syntaxTree(transaction.state)) {
+            return tables(transaction.state, focused);
+        }
+        return value;
+    },
+    provide: field => EditorView.decorations.from(field),
+});
+
 const livePreview = ViewPlugin.fromClass(class {
     constructor(view) { this.decorations = decorations(view.state, view.hasFocus, view.visibleRanges); }
     update(update) {
@@ -129,6 +229,10 @@ const theme = EditorView.theme({
     ".md-inline-code, .md-code-line": { fontFamily: "ui-monospace, monospace", backgroundColor: "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))", fontSize: "0.9em" },
     ".md-inline-code": { borderRadius: "0.25rem" },
     ".md-code-line": { padding: "0 0.5rem" },
+    ".md-image": { maxWidth: "100%", maxHeight: "20rem", verticalAlign: "middle", borderRadius: "0.5rem" },
+    ".md-table": { borderCollapse: "collapse", margin: "0.25rem 0", cursor: "text" },
+    ".md-table th, .md-table td": { border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", padding: "0.25rem 0.65rem", textAlign: "left" },
+    ".md-table th": { fontWeight: "650", backgroundColor: "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))" },
     ".md-bullet": { display: "inline-block", width: "0.7em", textAlign: "center", color: "var(--md-editor-accent, var(--color-primary, #146ade))" },
     ".cm-tooltip-autocomplete": { fontFamily: "inherit", backgroundColor: "var(--md-editor-background, var(--color-base-100, #fff))", color: "var(--md-editor-color, var(--color-base-content, #202936))", border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", borderRadius: "0.5rem", overflow: "hidden", boxShadow: "0 4px 16px #0002" },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "inherit", maxHeight: "min(20rem, 50vh)" },
@@ -149,7 +253,8 @@ export function mountEditor(textarea, host) {
             markdown({ base: commonmarkLanguage, extensions: [Strikethrough, Table, TaskList] }),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(editable()),
             autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
-            EditorView.lineWrapping, theme, livePreview, placeholder(textarea.placeholder),
+            EditorView.lineWrapping, theme, livePreview, focusState, tablePreview,
+            EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)), placeholder(textarea.placeholder),
             EditorView.contentAttributes.of({ "aria-label": textarea.getAttribute("aria-label") || "Markdown", "aria-multiline": "true", spellcheck: "true" }),
             EditorState.transactionFilter.of(transaction => {
                 const limit = textarea.maxLength;

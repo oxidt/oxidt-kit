@@ -153,3 +153,18 @@ test('slash insertion respects maxlength and a field becoming readonly', async (
     await page.keyboard.press('Enter');
     await expect(source(page)).toHaveValue('/code');
 });
+
+test('tables and images render until the cursor enters them', async ({ page }) => {
+    const markdown = 'Intro\n\n| Plan | Price |\n| --- | --- |\n| Pro | $9 |\n\n![Logo](data:image/gif;base64,R0lGODlhAQABAAAAACw=)';
+    await page.locator('oxidt-markdown-editor').evaluate((el, value) => el.setAttribute('data-value', value), markdown);
+    await expect(page.locator('.md-table td').first()).toHaveText('Pro');
+    await expect(page.locator('img.md-image')).toHaveAttribute('alt', 'Logo');
+    await page.locator('.md-table').click();
+    await expect(page.locator('.md-table')).toHaveCount(0);
+    await expect(field(page)).toContainText('| --- | --- |');
+    await expect(page.locator('img.md-image')).toHaveCount(1);
+    await page.keyboard.press('ControlOrMeta+End');
+    await expect(page.locator('.md-table')).toHaveCount(1);
+    await expect(page.locator('img.md-image')).toHaveCount(0);
+    await expect(source(page)).toHaveValue(markdown);
+});

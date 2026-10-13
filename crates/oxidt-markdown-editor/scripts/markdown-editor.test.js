@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { EditorState } from "@codemirror/state";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
-import { decorations } from "./markdown-editor.js";
+import { Table } from "@lezer/markdown";
+import { decorations, tables } from "./markdown-editor.js";
 
-function render(doc, selection, focused = true) {
+function render(doc, selection, focused = true, visible) {
     const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage })] });
     const ranges = [];
-    for (let cursor = decorations(state, focused).iter(); cursor.value; cursor.next()) {
+    for (let cursor = decorations(state, focused, visible).iter(); cursor.value; cursor.next()) {
         ranges.push({ from: cursor.from, to: cursor.to, ...cursor.value.spec });
     }
     return { state, ranges, hidden: ranges.filter(range => range.from < range.to && !range.class && !range.widget) };
@@ -52,10 +53,41 @@ test("links display the label and reveal the destination when editing", () => {
     expect(render(doc, { anchor: 5 }).hidden).toEqual([]);
 });
 
-test("image Markdown and raw HTML remain literal", () => {
-    for (const doc of ["![alt](image.png)", "<script>alert('test')</script>"]) {
-        expect(render(doc, { anchor: 0 }, false).hidden).toEqual([]);
+test("raw HTML remains literal", () => {
+    expect(render("<script>alert('test')</script>", { anchor: 0 }, false).ranges).toEqual([]);
+});
+
+test("images render and reveal their Markdown when editing", () => {
+    const doc = "Intro\n![A *chart*](https://example.com/c.png)";
+    const [image] = render(doc, { anchor: 0 }).ranges.filter(range => range.widget);
+    expect(image.widget).toMatchObject({ src: "https://example.com/c.png", alt: "A *chart*" });
+    expect([image.from, image.to]).toEqual([6, doc.length]);
+    expect(render(doc, { anchor: doc.length }).ranges.some(range => range.widget)).toBe(false);
+});
+
+test("every visible range is decorated when a block widget splits the viewport", () => {
+    const doc = "**a**\n\nskipped\n\n**b**";
+    const ranges = render(doc, { anchor: 0 }, false, [{ from: 0, to: 5 }, { from: 16, to: 21 }]).ranges;
+    expect(ranges.filter(range => range.class === "md-strong").map(range => range.from)).toEqual([0, 16]);
+});
+
+function tableRanges(doc, selection, focused = true) {
+    const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage, extensions: [Table] })] });
+    const ranges = [];
+    for (let cursor = tables(state, focused).iter(); cursor.value; cursor.next()) {
+        ranges.push({ from: cursor.from, to: cursor.to, ...cursor.value.spec });
     }
+    return ranges;
+}
+
+test("tables render as a block and reveal their Markdown when editing", () => {
+    const table = "| Plan | Price |\n| --- | --- |\n| Pro | **$9** |";
+    const doc = "Intro\n\n" + table + "\n\nAfter";
+    const [block] = tableRanges(doc, { anchor: 0 });
+    expect(block).toMatchObject({ from: 7, to: 7 + table.length, block: true });
+    expect(block.widget.rows).toEqual([["Plan", "Price"], ["Pro", "**$9**"]]);
+    expect(tableRanges(doc, { anchor: 7 + table.length })).toEqual([]);
+    expect(tableRanges(doc, { anchor: 7 + table.length }, false)).toHaveLength(1);
 });
 
 test("multiline emphasis never hides a line break", () => {

@@ -1,9 +1,10 @@
 # oxidt-markdown-editor
 
 A Markdown writing field with live formatting, shared by Topcoat and Dioxus.
-Headings, emphasis, links, lists and code blocks render in place. Syntax stays
-visible on selected lines and reappears when the cursor returns to a line.
-The underlying value is always Markdown. Images and tables remain source text.
+Headings, emphasis, links, lists, code blocks, images and tables render in
+place. Syntax stays visible on selected lines and reappears when the cursor
+returns to a line; clicking a rendered table moves the cursor into its source.
+The underlying value is always Markdown. Table cells show their source text.
 
 Enable only the framework you use. No framework is enabled by default.
 Both wrappers bundle the same checked-in JavaScript; consumers do not need Bun.
