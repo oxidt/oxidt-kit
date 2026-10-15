@@ -390,7 +390,30 @@ Read the session in a page or route:
 let user = oxidt_auth::topcoat::user_session(cx).await?.data()?;
 ```
 
-With `local-login` too, render the login page as a component (mount
+Render the FerrisKey login page as a component, inside your own document:
+
+```rust
+#[page("/login")]
+async fn login(cx: &Cx) -> Result<impl View> {
+    Ok(view! {
+        document(
+            title: "Sign in",
+            ferriskey_login_page(redirect_url: "/dashboard", captcha: captcha_config())
+        )
+    })
+}
+```
+
+It is server-rendered with the same steps as the Dioxus `LoginPage` (email,
+passkey, password, email code, captcha-gated registration, terms) and talks to
+the same `auth_router` endpoints. `redirect_url` must be a relative path or it
+is dropped and the server's default applies; after login the page loads the
+URL the server answers with. `embed: true` leaves out the full-page wrapper,
+card and "Welcome" heading. `captcha` is the bollwark `(server_url, site_key)`.
+In a debug build with `DEV_LOGIN=true` it also shows the dev-login button.
+There is no `on_success` / `on_signup` callback: login ends in a full page load.
+
+With `local-login` too, render the self-owned login page instead (mount
 `local_auth_router` instead of `auth_router`):
 
 ```rust
@@ -400,7 +423,10 @@ view! {
 ```
 
 It is server-rendered with the same steps as the Dioxus `LocalLoginPage`
-(OTP, passkey autofill and modal, password, terms, passkey offer) and an
-inlined script drives them, so a strict CSP needs to allow inline scripts.
-Styling is the same Tailwind + DaisyUI classes, so point Tailwind's scan at
-this crate's `src/topcoat/` as you would for the Dioxus pages.
+(OTP, passkey autofill and modal, password, terms, passkey offer).
+
+On both pages an inlined script drives the steps, so a strict CSP needs to
+allow inline scripts. Styling is the same Tailwind + DaisyUI classes as the
+Dioxus pages, so point Tailwind's scan (or your safelist) at this crate's
+`src/topcoat/`. The local page also uses the optional host hooks listed under
+[Local mode](#local-mode-no-identity-provider); the FerrisKey page needs none.

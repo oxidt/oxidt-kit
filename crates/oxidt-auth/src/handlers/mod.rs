@@ -24,5 +24,8 @@ pub use shared::{
 };
 pub use sso::{sso_callback, sso_complete, sso_start};
 
+#[cfg(feature = "topcoat")]
+pub(crate) use shared::is_safe_redirect_url;
+
 #[cfg(debug_assertions)]
 pub use dev_login::dev_login_handler;

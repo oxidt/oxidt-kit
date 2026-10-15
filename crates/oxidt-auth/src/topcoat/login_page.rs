@@ -8,13 +8,13 @@ use ::topcoat::{
     Result,
     context::Cx,
     router::request,
-    view::{NodeViewParts, PartsWriter, View, component, view},
+    view::{View, component, view},
 };
 
+use super::parts::{CHECK_CIRCLE, Trusted, X_CIRCLE, catalog, icon, spinner};
 use crate::locale::{Locale, tr_in};
 
 const SCRIPT: &str = include_str!("local_login.js");
-const DE_CATALOG: &str = include_str!("../../locales/de.json");
 
 /// Multi-step login page for the self-owned flow (`local_auth_router`): email
 /// OTP with auto-passkey detection, passkey autofill, an optional password
@@ -37,10 +37,7 @@ pub async fn local_login_page(
         Some(name) => t("Welcome to {name}").replace("{name}", name),
         None => t("Sign in"),
     };
-    let catalog = match locale {
-        Locale::De => DE_CATALOG,
-        Locale::En => "{}",
-    };
+    let catalog = catalog(locale);
 
     Ok(view! {
         <div
@@ -266,38 +263,5 @@ pub async fn local_login_page(
     })
 }
 
-/// Markup written verbatim. Only for compile-time constants of this crate:
-/// the script and the locale catalog, neither of which contains `</`.
-struct Trusted(&'static str);
-
-impl NodeViewParts for Trusted {
-    fn into_view_parts(self, _cx: &Cx, parts: &mut PartsWriter<'_>) {
-        parts.push_static_str_unescaped(self.0);
-    }
-}
-
-#[component]
-async fn spinner() -> Result<impl View> {
-    Ok(
-        view! { <span data-spinner="" hidden=(true) class="loading loading-spinner loading-sm"></span> },
-    )
-}
-
 const FINGERPRINT: &str = "M7.864 4.243A7.5 7.5 0 0119.5 10.5c0 2.92-.556 5.709-1.568 8.268M5.742 6.364A7.465 7.465 0 004.5 10.5a7.464 7.464 0 01-1.15 3.993m1.989 3.559A11.209 11.209 0 008.25 10.5a3.75 3.75 0 117.5 0c0 .527-.021 1.049-.064 1.565M12 10.5a14.94 14.94 0 01-3.6 9.75m6.633-4.596a18.666 18.666 0 01-2.485 5.33";
 const LOCK: &str = "M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z";
-const CHECK_CIRCLE: &str = "M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z";
-const X_CIRCLE: &str = "M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z";
-
-/// Inline outline icon (kept local to avoid an icon-crate dep in the auth crate).
-#[component]
-async fn icon(
-    d: &'static str,
-    class: &'static str,
-    stroke_width: &'static str,
-) -> Result<impl View> {
-    Ok(view! {
-        <svg xmlns="http://www.w3.org/2000/svg" class=(class) fill="none" viewBox="0 0 24 24" stroke-width=(stroke_width) stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d=(d)></path>
-        </svg>
-    })
-}

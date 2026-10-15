@@ -142,3 +142,94 @@ mod login_page {
         );
     }
 }
+
+mod ferriskey_login_page {
+    use super::body;
+    use oxidt_auth::topcoat::ferriskey_login_page;
+    use topcoat::{
+        Result,
+        router::{Router, page, query_params, request::Request},
+        view::{View, view},
+    };
+
+    #[query_params]
+    struct LoginQuery {
+        redirect_url: Option<String>,
+        embed: Option<bool>,
+    }
+
+    #[page("/login")]
+    async fn login(cx: &topcoat::context::Cx) -> Result<impl View> {
+        let query = query_params::<LoginQuery>(cx).ok();
+        let redirect_url = query
+            .and_then(|q| q.redirect_url.clone())
+            .unwrap_or_default();
+        let embed = query.and_then(|q| q.embed).unwrap_or_default();
+        Ok(view! { ferriskey_login_page(redirect_url: &redirect_url, embed: embed) })
+    }
+
+    async fn render(query: &str, accept_language: &str) -> String {
+        let app = Router::builder().page(login).build();
+        let req = Request::get(format!("/login?{query}"))
+            .header("accept-language", accept_language)
+            .body(().into())
+            .unwrap();
+        body(app.handle(req).await).await
+    }
+
+    #[tokio::test]
+    async fn renders_every_step_and_the_unescaped_script() {
+        let html = render("redirect_url=/home", "en").await;
+        for step in [
+            "email",
+            "detecting",
+            "passkey",
+            "password",
+            "otp",
+            "tos",
+            "verifying",
+            "success",
+        ] {
+            assert!(
+                html.contains(&format!("data-step=\"{step}\"")),
+                "missing {step}"
+            );
+        }
+        assert!(html.contains("data-redirect=\"/home\""));
+        assert!(html.contains("data-start=\"email\""));
+        assert!(html.contains("<h1 class=\"text-2xl font-bold\">Welcome</h1>"));
+        assert!(html.contains("<script>// Drives the Topcoat `ferriskey_login_page`"));
+        assert!(html.contains("type=\"application/json\">{}</script>"));
+    }
+
+    #[tokio::test]
+    async fn drops_an_offsite_redirect() {
+        let html = render("redirect_url=//evil.example", "en").await;
+        assert!(html.contains("data-redirect=\"\""));
+        assert!(!html.contains("evil.example"));
+    }
+
+    #[tokio::test]
+    async fn embed_leaves_out_the_frame() {
+        let html = render("redirect_url=/home&embed=true", "en").await;
+        assert!(html.contains("data-step=\"email\""));
+        assert!(!html.contains("card-body"));
+        assert!(!html.contains("min-h-screen"));
+    }
+
+    #[tokio::test]
+    async fn starts_on_terms_when_asked() {
+        let html = render("redirect_url=/home%3Faccept_tos%3Dtrue", "en").await;
+        assert!(html.contains("data-start=\"tos\""));
+    }
+
+    #[tokio::test]
+    async fn negotiates_german() {
+        let html = render("redirect_url=/home", "de").await;
+        assert!(html.contains("Anmelden oder Konto erstellen"));
+        assert!(
+            html.contains("\"Back\""),
+            "German catalog is shipped to the script"
+        );
+    }
+}

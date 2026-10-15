@@ -18,6 +18,9 @@
 //! ```rust,ignore
 //! let user = oxidt_auth::topcoat::user_session(cx).await?.data()?;
 //! ```
+//!
+//! [`ferriskey_login_page`] renders the login page for `auth_router`; with
+//! `local-login`, `local_login_page` renders the one for `local_auth_router`.
 
 use ::topcoat::{context::Cx, router::request::extensions};
 
@@ -36,8 +39,12 @@ pub async fn user_session(cx: &Cx) -> Result<UserSession, AuthError> {
     UserSession::from_session(session).await
 }
 
+mod ferriskey_login;
 #[cfg(feature = "local-login")]
 mod login_page;
+mod parts;
+
+pub use ferriskey_login::ferriskey_login_page;
 
 #[cfg(feature = "local-login")]
 pub use login_page::local_login_page;

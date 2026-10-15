@@ -94,7 +94,10 @@ name = "oxidt-auth"
 # 0.14.1 fixes the Topcoat login page: passkey prompts are cancellable, email-
 # free passkey sign-in keeps `redirect_url` (both pages), and "use email code
 # instead" shows only where a code can be sent. Additive.
-version = "0.14.1"
+# 0.16.0 adds `topcoat::ferriskey_login_page`, the FerrisKey `LoginPage` as a
+# Topcoat component (`topcoat` alone, no `local-login`). Additive. (0.15.0 is
+# taken by a tag cut off a side commit.)
+version = "0.16.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -213,8 +216,9 @@ passkey-rp = ["axum", "dep:ring", "dep:ciborium"]
 # place of `auth_router`. Additive at the crate level — the FerrisKey flow still
 # compiles — but the two routers own the same paths, so an app mounts one.
 local-login = ["passkey-rp"]
-# Read the login state from Topcoat pages (`topcoat::user_session`). Topcoat
-# mounts `auth_router` as a tower service; no Dioxus involved.
+# Read the login state from Topcoat pages (`topcoat::user_session`) and render
+# the FerrisKey login page (`topcoat::ferriskey_login_page`). Topcoat mounts
+# `auth_router` as a tower service; no Dioxus involved.
 topcoat = ["axum", "dep:topcoat"]
 web = [
     "dep:dioxus",
