@@ -62,29 +62,34 @@ rsx! {
 }
 ```
 
-`document::Script` loads the module once. Controlled value changes update the
-editor without echoing an input event. Removing the component destroys the
+`document::Script` loads the module once. Controlled value changes, including
+a rerender that rejects an edit, update the editor without echoing an input
+event. Server rendering puts the first value in the textarea for the no-JS
+fallback and form reset. Removing the component destroys the
 CodeMirror view; multiple fields keep independent state and undo histories.
 
 ## App integration
 
 The textarea emits bubbling `input` events and keeps its `value` and selection
-in sync. Saving, uploads, HTML rendering and application shortcuts remain in
+in sync. Assigning `textarea.value` updates the editor without an input event,
+as with a native field. Saving, uploads, HTML rendering and application shortcuts remain in
 the host app. After mounting, access the field's browser API with:
 
 ```js
 const editor = textarea.closest("oxidt-markdown-editor").editor;
 editor.setValue(markdown);            // emits input if changed
 editor.setValue(markdown, false);     // controlled update, no input echo
-editor.insert(offset, imageMarkdown); // its own undo step
+editor.insert(offset, imageMarkdown); // its own undo step; false if rejected
 editor.show(false);                  // hide for a server-rendered preview
 editor.show(true);                   // show and focus
 ```
 
 The API is absent until the module loads; retain the textarea fallback.
-`positionAt(event)` maps a drop's client coordinates to a document offset.
-Native `required`, `maxlength`, `disabled`, `readonly`, labels and form reset
-are supported. Server validation remains the application's responsibility.
+`insert` returns `false` when the field is disabled, readonly, or the text
+would exceed `maxlength`. `positionAt(event)` maps a drop's client coordinates
+to a document offset. Native `required`, `maxlength`, `disabled` (including a
+disabled fieldset), `readonly`, `placeholder`, labels and form reset are
+supported; `aria-invalid` and `aria-describedby` carry over to the editor. Server validation remains the application's responsibility.
 
 Styles use DaisyUI colors when available, with plain CSS fallbacks. Override
 `--md-editor-background`, `--md-editor-color`, `--md-editor-border`,

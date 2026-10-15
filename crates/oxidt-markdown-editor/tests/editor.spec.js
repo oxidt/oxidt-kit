@@ -25,7 +25,7 @@ test('typing formats in place and preserves Markdown in the form', async ({ page
 });
 
 test('controlled values update without an input echo', async ({ page }) => {
-    await page.locator('oxidt-markdown-editor').evaluate(el => el.setAttribute('data-value', '# Restored'));
+    await source(page).evaluate(el => { el.value = '# Restored'; });
     await expect(source(page)).toHaveValue('# Restored');
     await expect(page.locator('.md-h1')).toHaveText('Restored');
     expect(await page.evaluate(() => window.inputs)).toBe(0);
@@ -33,9 +33,16 @@ test('controlled values update without an input echo', async ({ page }) => {
     await expect(page.locator('.md-h1')).toHaveText('# Restored');
 });
 
+test('a value rewritten during input, as a rejected controlled edit, reaches the editor', async ({ page }) => {
+    await source(page).evaluate(el => el.addEventListener('input', () => { el.value = el.value.toUpperCase(); }));
+    await write(page, 'shout');
+    await expect(source(page)).toHaveValue('SHOUT');
+    await expect(field(page)).toHaveText('SHOUT');
+});
+
 test('image insertion is an independent undo step', async ({ page }) => {
     await write(page, 'Before');
-    await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.insert(6, '\n\n![image](image.png)'));
+    expect(await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.insert(6, '\n\n![image](image.png)'))).toBe(true);
     await expect(source(page)).toHaveValue('Before\n\n![image](image.png)');
     await page.keyboard.press('ControlOrMeta+z');
     await expect(source(page)).toHaveValue('Before');
@@ -47,6 +54,8 @@ test('disabled state, maxlength, labels, and required validation work', async ({
     await source(page).evaluate(el => { el.disabled = false; el.maxLength = 5; });
     await write(page, 'hello');
     await page.keyboard.insertText('!');
+    await expect(source(page)).toHaveValue('hello');
+    expect(await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.insert(5, '!'))).toBe(false);
     await expect(source(page)).toHaveValue('hello');
     await write(page, '');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
@@ -156,7 +165,7 @@ test('slash insertion respects maxlength and a field becoming readonly', async (
 
 test('tables and images render until the cursor enters them', async ({ page }) => {
     const markdown = 'Intro\n\n| Plan | Price |\n| --- | --- |\n| Pro | $9 |\n\n![Logo](data:image/gif;base64,R0lGODlhAQABAAAAACw=)';
-    await page.locator('oxidt-markdown-editor').evaluate((el, value) => el.setAttribute('data-value', value), markdown);
+    await page.locator('oxidt-markdown-editor').evaluate((el, value) => el.editor.setValue(value, false), markdown);
     await expect(page.locator('.md-table td').first()).toHaveText('Pro');
     await expect(page.locator('img.md-image')).toHaveAttribute('alt', 'Logo');
     await page.locator('.md-table').click();
@@ -167,4 +176,45 @@ test('tables and images render until the cursor enters them', async ({ page }) =
     await expect(page.locator('.md-table')).toHaveCount(1);
     await expect(page.locator('img.md-image')).toHaveCount(0);
     await expect(source(page)).toHaveValue(markdown);
+});
+
+test('a disabled fieldset disables the editor', async ({ page }) => {
+    await page.evaluate(() => {
+        const fieldset = document.createElement('fieldset');
+        const form = document.querySelector('form');
+        form.prepend(fieldset);
+        fieldset.append(form.querySelector('oxidt-markdown-editor'));
+        fieldset.disabled = true;
+    });
+    await expect(field(page)).toHaveAttribute('contenteditable', 'false');
+    expect(await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.insert(0, 'x'))).toBe(false);
+    await page.locator('fieldset').evaluate(el => { el.disabled = false; });
+    await expect(field(page)).toHaveAttribute('contenteditable', 'true');
+});
+
+test('name, requirement, errors, and placeholder follow the textarea', async ({ page }) => {
+    await expect(field(page)).toHaveAttribute('aria-required', 'true');
+    await source(page).evaluate(el => {
+        el.removeAttribute('aria-label');
+        el.setAttribute('aria-invalid', 'true');
+        el.setAttribute('aria-describedby', 'body-error');
+        el.placeholder = 'Say something';
+    });
+    await expect(field(page)).toHaveAttribute('aria-label', 'Message');
+    await expect(field(page)).toHaveAttribute('aria-invalid', 'true');
+    await expect(field(page)).toHaveAttribute('aria-describedby', 'body-error');
+    await write(page, '');
+    await expect(page.locator('.cm-placeholder')).toHaveText('Say something');
+});
+
+test('reset still applies after the field moves to another form', async ({ page }) => {
+    await page.evaluate(() => {
+        const other = document.createElement('form');
+        document.body.append(other);
+        other.append(document.querySelector('oxidt-markdown-editor'));
+    });
+    await write(page, '# Changed');
+    await page.evaluate(() => document.querySelectorAll('form')[1].reset());
+    await expect(source(page)).toHaveValue('# Original\n\n**Text**');
+    await expect(page.locator('.md-h1')).toHaveText('Original');
 });

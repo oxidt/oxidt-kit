@@ -18,7 +18,11 @@ pub async fn markdown_editor(value: &str, #[default] attrs: Attributes) -> Resul
     Ok(view! {
         <oxidt-markdown-editor>
             <div data-editor-host=""></div>
-            <textarea (attrs)>(value)</textarea>
+            // HTML parsing drops one newline right after `<textarea>`.
+            <textarea (attrs)>
+                ("\n")
+                (value)
+            </textarea>
         </oxidt-markdown-editor>
         <script type="module" src=(EDITOR_JS)></script>
     })

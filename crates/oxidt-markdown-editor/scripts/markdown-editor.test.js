@@ -101,3 +101,9 @@ test("bullet widgets preserve ordered list numbering", () => {
     expect(render("- item", { anchor: 0 }, false).ranges.some(range => range.widget)).toBe(true);
     expect(render("1. item", { anchor: 0 }, false).ranges.some(range => range.widget)).toBe(false);
 });
+
+test("every visible range is decorated", () => {
+    const doc = "**a**\n\n**b**";
+    expect(render(doc, { anchor: 0 }, false, [{ from: 0, to: 5 }, { from: 7, to: 12 }]).ranges)
+        .toEqual(render(doc, { anchor: 0 }, false).ranges);
+});

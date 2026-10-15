@@ -1,8 +1,8 @@
-import { Compartment, EditorState, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorState, Prec, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
-import { syntaxTree } from "@codemirror/language";
-import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
+import { Language, LanguageSupport, syntaxTree } from "@codemirror/language";
+import { commonmarkLanguage, markdownKeymap } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, TaskList } from "@lezer/markdown";
 import { autocompletion } from "@codemirror/autocomplete";
 import { slashCommands } from "./slash-commands.js";
@@ -14,6 +14,7 @@ class Bullet extends WidgetType {
         span.textContent = "•";
         return span;
     }
+    eq() { return true; }
     ignoreEvent() { return false; }
 }
 
@@ -95,14 +96,15 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
     // The syntax tree handles escapes, nested emphasis, and code correctly;
     // regexes over the document would also format Markdown inside code fences.
     const visited = new Set();
+    const opaque = new Set(["Image", "HTMLBlock", "HTMLTag", "InlineCode", "FencedCode", "CodeBlock"]);
     for (const range of ranges) syntaxTree(state).iterate({
         from: range.from, to: range.to,
         enter(ref) {
             const { node, name, from, to } = ref;
             const id = name + ":" + from;
-            // Ranges overlap at shared ancestors such as Document; skip only the
-            // repeat decoration so later ranges still reach their own children.
-            if (visited.has(id)) return;
+            // A node spanning several ranges is decorated once, but its
+            // children in later ranges still need a visit.
+            if (visited.has(id)) return opaque.has(name) ? false : undefined;
             visited.add(id);
             if (name === "Image") {
                 const url = node.getChild("URL");
@@ -242,20 +244,42 @@ const theme = EditorView.theme({
 });
 
 export function mountEditor(textarea, host) {
+    const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
     const controls = new Compartment();
     let notifying = true;
-    const editable = () => [EditorState.readOnly.of(textarea.disabled || textarea.readOnly), EditorView.editable.of(!textarea.disabled && !textarea.readOnly)];
+    // :disabled also covers a disabled ancestor fieldset.
+    const locked = () => textarea.matches(":disabled") || textarea.readOnly;
+    const labels = [...textarea.labels];
+    // The textarea is hidden from assistive technology, so the visible
+    // textbox carries its name, requirement, and error state.
+    const controlled = () => {
+        const attributes = {
+            "aria-label": textarea.getAttribute("aria-label") || labels[0]?.textContent.trim() || "Markdown",
+            "aria-multiline": "true",
+            spellcheck: "true",
+        };
+        for (const name of ["aria-labelledby", "aria-describedby", "aria-invalid"]) {
+            if (textarea.hasAttribute(name)) attributes[name] = textarea.getAttribute(name);
+        }
+        if (textarea.required) attributes["aria-required"] = "true";
+        return [
+            EditorState.readOnly.of(locked()), EditorView.editable.of(!locked()),
+            placeholder(textarea.placeholder), EditorView.contentAttributes.of(attributes),
+        ];
+    };
     const view = new EditorView({
         parent: host,
         doc: textarea.value,
         selection: { anchor: textarea.selectionStart, head: textarea.selectionEnd },
         extensions: [
-            markdown({ base: commonmarkLanguage, extensions: [Strikethrough, Table, TaskList] }),
-            history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(editable()),
+            // markdown() would also bundle lang-html, css and javascript for
+            // features this editor leaves off; only its list keymap is kept.
+            new LanguageSupport(new Language(commonmarkLanguage.data, commonmarkLanguage.parser.configure([Strikethrough, Table, TaskList]), [], "markdown")),
+            Prec.high(keymap.of(markdownKeymap)),
+            history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(controlled()),
             autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
             EditorView.lineWrapping, theme, livePreview, focusState, tablePreview,
-            EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)), placeholder(textarea.placeholder),
-            EditorView.contentAttributes.of({ "aria-label": textarea.getAttribute("aria-label") || "Markdown", "aria-multiline": "true", spellcheck: "true" }),
+            EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)),
             EditorState.transactionFilter.of(transaction => {
                 const limit = textarea.maxLength;
                 return transaction.isUserEvent("input") && limit >= 0 && transaction.newDoc.length > limit &&
@@ -263,7 +287,7 @@ export function mountEditor(textarea, host) {
             }),
             EditorView.updateListener.of(update => {
                 const selection = update.state.selection.main;
-                if (update.docChanged) textarea.value = update.state.doc.toString();
+                if (update.docChanged) native.set.call(textarea, update.state.doc.toString());
                 textarea.setSelectionRange(selection.from, selection.to);
                 if (update.docChanged && notifying) textarea.dispatchEvent(new Event("input", { bubbles: true }));
             }),
@@ -274,11 +298,16 @@ export function mountEditor(textarea, host) {
     host.hidden = wasHidden;
     textarea.hidden = true;
     if (hadFocus) view.focus();
-    const observer = new MutationObserver(() => view.dispatch({ effects: controls.reconfigure(editable()) }));
-    observer.observe(textarea, { attributes: true, attributeFilter: ["disabled", "readonly"] });
+    const observer = new MutationObserver(records => {
+        if (records.some(record => record.target === textarea || record.target.localName === "fieldset")) {
+            view.dispatch({ effects: controls.reconfigure(controlled()) });
+        }
+    });
+    observer.observe(textarea, { attributes: true, attributeFilter: ["disabled", "readonly", "placeholder", "required", "aria-label", "aria-labelledby", "aria-describedby", "aria-invalid"] });
+    // Any fieldset may come to contain the field, so watch them page-wide.
+    observer.observe(document, { attributes: true, attributeFilter: ["disabled"], subtree: true });
     const focus = event => { event.preventDefault(); view.focus(); };
     textarea.addEventListener("invalid", focus);
-    const labels = [...textarea.labels];
     labels.forEach(label => label.addEventListener("click", focus));
     const api = {
         setValue(value, notify = true) {
@@ -288,26 +317,39 @@ export function mountEditor(textarea, host) {
             } finally { notifying = true; }
         },
         insert(at, text) {
-            if (textarea.disabled || textarea.readOnly) return;
+            if (locked()) return false;
+            const before = view.state.doc;
             view.dispatch({ changes: { from: at, insert: text }, selection: { anchor: at + text.length }, scrollIntoView: true, userEvent: "input.paste", annotations: isolateHistory.of("full") });
             view.focus();
+            return view.state.doc !== before;
         },
         positionAt(event) { return view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head; },
         show(visible) { host.hidden = !visible; if (visible) view.focus(); },
         destroy() {
             observer.disconnect();
             clearTimeout(resetTimer);
-            form?.removeEventListener("reset", reset);
+            document.removeEventListener("reset", reset, true);
+            delete textarea.value;
             textarea.removeEventListener("invalid", focus);
             labels.forEach(label => label.removeEventListener("click", focus));
             view.destroy();
             textarea.hidden = wasHidden;
         },
     };
+    // Programmatic writes, including a framework's controlled value, update
+    // the editor without an input event, like a native textarea.
+    Object.defineProperty(textarea, "value", {
+        configurable: true,
+        get() { return native.get.call(textarea); },
+        set(value) { native.set.call(textarea, value); api.setValue(native.get.call(textarea), false); },
+    });
+    // Reset does not bubble; capturing at the document follows the field into
+    // whichever form currently owns it.
     let resetTimer;
-    const form = textarea.form;
-    const reset = () => { resetTimer = setTimeout(() => api.setValue(textarea.value), 0); };
-    form?.addEventListener("reset", reset);
+    const reset = event => {
+        if (event.target === textarea.form) resetTimer = setTimeout(() => api.setValue(textarea.value), 0);
+    };
+    document.addEventListener("reset", reset, true);
     return api;
 }
 
@@ -315,7 +357,6 @@ export function mountEditor(textarea, host) {
 // DOM. Disconnect cleanup also covers Dioxus navigation and Topcoat fragments.
 if (typeof customElements !== "undefined" && !customElements.get("oxidt-markdown-editor")) {
     customElements.define("oxidt-markdown-editor", class extends HTMLElement {
-        static observedAttributes = ["data-value"];
         connectedCallback() {
             queueMicrotask(() => {
                 if (!this.isConnected || this.editor) return;
@@ -324,12 +365,8 @@ if (typeof customElements !== "undefined" && !customElements.get("oxidt-markdown
                 if (!textarea || !host) return;
                 this.style.display = "block";
                 this.style.minWidth = "0";
-                if (this.hasAttribute("data-value")) textarea.value = this.getAttribute("data-value");
                 this.editor = mountEditor(textarea, host);
             });
-        }
-        attributeChangedCallback(name, before, value) {
-            if (before !== value && value !== null) this.editor?.setValue(value, false);
         }
         disconnectedCallback() {
             queueMicrotask(() => {
