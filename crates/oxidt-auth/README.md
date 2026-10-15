@@ -285,6 +285,90 @@ credentials; the `user_id` is the `sub` of a FerrisKey login. It returns
 safe. The client's service account needs a role with the `manage_users`
 permission in the realm, or FerrisKey answers 403.
 
+## Confirming a sensitive action by email
+
+`action_proof` (feature `axum`) asks a logged-in session for a fresh emailed
+code before one sensitive action, such as removing a passkey or deleting an
+account. The code is bound to the action, user, session and target, and it is
+mailed to the account's current address. It expires after 5 minutes and allows
+5 guesses (malformed ones count). It is spent **in the same transaction as the
+action**. No elevation token is ever issued.
+
+The crate runs the protocol. The app implements `ActionProofBackend`: storage,
+quotas, the action's own email, and the action itself.
+
+```rust
+use oxidt_auth::action_proof::{self, ActionBinding, ActionProofError};
+
+const REMOVE_PASSKEY: &str = "passkey-removal";
+
+// POST /api/passkeys/removal-code  {id}
+let binding = ActionBinding::from_session(&session, REMOVE_PASSKEY, id.to_string()).await?;
+action_proof::request(&PasskeyRemoval(state.clone()), &binding).await?;
+
+// POST /api/passkeys/delete  {id, code}
+let binding = ActionBinding::from_session(&session, REMOVE_PASSKEY, id.to_string()).await?;
+match action_proof::confirm(&PasskeyRemoval(state.clone()), &binding, &code).await {
+    Ok(()) => {}                                    // removed, exactly once
+    Err(ActionProofError::Rejected) => {}           // 403: ask for a new code
+    Err(ActionProofError::LimitExceeded) => {}      // 429
+    Err(ActionProofError::Backend(e)) => {}         // the app's own error, e.g. NotFound
+    Err(_) => {}                                    // 500
+}
+```
+
+`ActionBinding::from_session` takes the user from `LoggedInData`, never from
+the request. The session part is a hash of the session id. The built-in login
+handlers rotate that id, so a pending code does not survive a relogin. The
+`session::login` helper alone does not rotate it: a custom login must call
+`session.cycle_id()` itself. Build the binding from the live session on every
+request, as above, and never cache it across requests. These routes live in
+the app, not in `auth_router`, so give them a same-origin check yourself
+(`csrf::csrf_origin_check`, or an equivalent).
+
+A code only proves the user could read the account's mail just now. It grants
+no permission. `consume_and_perform` must re-run the action's own
+authorization in the same transaction (the target still exists, the user still
+owns it, a membership or role is still held) and roll back if any check fails.
+
+Each backend method must be atomic in storage that all replicas share. A
+process-local lock is not enough. On PostgreSQL that takes a proofs table, the
+app's quota counters, one statement per method, and one transaction for
+`consume_and_perform`:
+
+```sql
+CREATE TABLE action_proofs (
+    action TEXT NOT NULL,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_key TEXT NOT NULL,
+    target TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (action, user_id, session_key)
+);
+```
+
+| method | what it must do |
+|---|---|
+| `charge_issue` / `charge_guess` | a shared counter upsert (`INSERT … ON CONFLICT DO UPDATE … RETURNING count`) keyed by action and user, **never by session or target**, shared by all replicas. An `Err` refuses, so the counter fails closed (unlike an `AuthRateLimitStore` that fails open). A daily issuance cap is what bounds guessing across resends. Keep each counter until its window ends: a sweep that deletes it sooner (hourly, say) resets a daily cap |
+| `recipient` | `SELECT u.email … JOIN <target table> … WHERE u.id = $user AND <target> = $target`: the current address, and `None` unless the user owns the target |
+| `store_pending` | `INSERT … ON CONFLICT (action, user_id, session_key) DO UPDATE SET target, recipient, code_hash, attempts = 0, expires_at = NOW() + ttl` |
+| `send_code` | **the action's own email**: what is being confirmed, that the code does not sign anyone in, and what to do if the request was not theirs. Not the login-code mail |
+| `discard_pending` | `DELETE … WHERE action, user_id, session_key AND code_hash = $hash`, so a racing resend's code survives. Best effort after a failed send: an error is only logged, and the row then stays usable until it expires |
+| `charge_attempt` | `UPDATE … SET attempts = attempts + 1 WHERE action, user_id, session_key, target AND expires_at > NOW() AND attempts < $max RETURNING code_hash` |
+| `consume_and_perform` | in one transaction: `DELETE FROM action_proofs p USING users u WHERE` action, user_id, session_key, target, `p.code_hash = $hash AND p.expires_at > NOW() AND u.id = p.user_id AND u.email = p.recipient`. If one row was deleted, re-check the action's authorization, run the action scoped by user and target, and commit (`Ok(true)`). If none, `Ok(false)`. If a check or the action fails, roll back and return `Err` |
+
+`ActionProofError::Delivery` means `send_code` returned an error, not that the
+mail went nowhere: an SMTP failure can still deliver. The crate then tries
+`discard_pending`, which can fail too.
+
+The quotas, the email copy, the schema and sweeping expired rows are all the
+app's. Sweep expired proofs freely, but never a quota counter whose window is
+still open. The crate's tests run a backend built to these contracts through resend,
+failed-delivery and double-confirm races.
+
 ## Security notes
 
 **Middleware order is load-bearing.** Axum applies the last `.layer()`

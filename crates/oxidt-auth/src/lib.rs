@@ -54,6 +54,9 @@ pub mod csrf;
 #[cfg(feature = "axum")]
 pub mod rate_limit;
 
+#[cfg(feature = "axum")]
+pub mod action_proof;
+
 /// WebAuthn Relying Party — ceremony options, and registration/assertion
 /// verification against the app's own credential store.
 ///
