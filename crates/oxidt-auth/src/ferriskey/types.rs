@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthenticateResponse {
     pub status: AuthenticationStatus,
-    #[serde(default)]
+    #[serde(default, alias = "login_url")]
     pub url: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
@@ -117,3 +117,46 @@ pub struct FerrisKeyFlow {
 
 // PasskeyInfo lives in crate::types (ungated) so both web + server can use it.
 pub use crate::types::PasskeyInfo;
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthenticateResponse, AuthenticationStatus};
+
+    #[test]
+    fn passkey_success_preserves_login_url() {
+        let response: AuthenticateResponse = serde_json::from_str(
+            r#"{"status":"Success","login_url":"https://app.example/auth/callback?code=passkey-code&state=flow-state"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.status, AuthenticationStatus::Success);
+        assert_eq!(
+            response.url.as_deref(),
+            Some("https://app.example/auth/callback?code=passkey-code&state=flow-state")
+        );
+    }
+
+    #[test]
+    fn password_success_preserves_url() {
+        let response: AuthenticateResponse = serde_json::from_str(
+            r#"{"status":"Success","url":"https://app.example/auth/callback?code=password-code&state=flow-state"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.status, AuthenticationStatus::Success);
+        assert_eq!(
+            response.url.as_deref(),
+            Some("https://app.example/auth/callback?code=password-code&state=flow-state")
+        );
+    }
+
+    #[test]
+    fn pending_authentication_does_not_require_a_redirect() {
+        let response: AuthenticateResponse =
+            serde_json::from_str(r#"{"status":"RequiresOtpChallenge","message":"Enter your OTP"}"#)
+                .unwrap();
+
+        assert_eq!(response.status, AuthenticationStatus::RequiresOtpChallenge);
+        assert!(response.url.is_none());
+    }
+}
