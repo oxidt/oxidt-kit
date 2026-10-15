@@ -50,29 +50,53 @@ pub async fn local_login_page(
                 <div class="card-body p-7 sm:p-9">
                     <div class="text-center mb-7">
                         if let Some(src) = &logo_src {
-                            <img src=(src) alt=(app_name.as_deref().unwrap_or_default()) class="h-16 mx-auto mb-4">
+                            <img
+                                src=(src)
+                                alt=(app_name.as_deref().unwrap_or_default())
+                                class="h-16 mx-auto mb-4"
+                            >
                         }
                         <h1 class="text-2xl font-bold tracking-tight">(heading)</h1>
-                        <p class="text-sm text-base-content/60 mt-1.5">(t("Sign in or create an account"))</p>
+                        <p class="text-sm text-base-content/60 mt-1.5">
+                            (t("Sign in or create an account"))
+                        </p>
                     </div>
 
                     // Enabled by the script, so a submit before it ran can't
                     // fall through to a native GET. `contents` keeps it out of
                     // the layout.
                     <fieldset class="contents" disabled=(true)>
-                        <div data-alert="success" hidden=(true) class="animate-alert-in flex items-start gap-2.5 rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-sm text-success mb-4">
-                            icon(d: CHECK_CIRCLE, class: "stroke-current shrink-0 h-5 w-5 mt-px", stroke_width: "2")
+                        <div
+                            data-alert="success"
+                            hidden=(true)
+                            class="animate-alert-in flex items-start gap-2.5 rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-sm text-success mb-4"
+                        >
+                            icon(
+                                d: CHECK_CIRCLE,
+                                class: "stroke-current shrink-0 h-5 w-5 mt-px",
+                                stroke_width: "2"
+                            )
                             <span data-msg=""></span>
                         </div>
-                        <div data-alert="error" hidden=(true) class="animate-alert-in flex items-start gap-2.5 rounded-xl border border-error/25 bg-error/10 px-4 py-3 text-sm text-error mb-4">
-                            icon(d: X_CIRCLE, class: "stroke-current shrink-0 h-5 w-5 mt-px", stroke_width: "2")
+                        <div
+                            data-alert="error"
+                            hidden=(true)
+                            class="animate-alert-in flex items-start gap-2.5 rounded-xl border border-error/25 bg-error/10 px-4 py-3 text-sm text-error mb-4"
+                        >
+                            icon(
+                                d: X_CIRCLE,
+                                class: "stroke-current shrink-0 h-5 w-5 mt-px",
+                                stroke_width: "2"
+                            )
                             <span data-msg=""></span>
                         </div>
 
                         <div data-step="email" class="animate-step-in">
                             <form data-form="email" novalidate=(true) class="space-y-4">
                                 <fieldset class="fieldset">
-                                    <label class="fieldset-label" for="oxidt-login-email">(t("Email address"))</label>
+                                    <label class="fieldset-label" for="oxidt-login-email">
+                                        (t("Email address"))
+                                    </label>
                                     <input
                                         id="oxidt-login-email"
                                         name="email"
@@ -86,10 +110,17 @@ pub async fn local_login_page(
                                         autocapitalize="none"
                                         spellcheck="false"
                                     >
-                                    <p data-email-error="" hidden=(true) class="text-xs text-error mt-1.5 animate-alert-in"></p>
+                                    <p
+                                        data-email-error=""
+                                        hidden=(true)
+                                        class="text-xs text-error mt-1.5 animate-alert-in"
+                                    ></p>
                                 </fieldset>
                                 if let Some((server_url, site_key)) = &captcha {
-                                    <script src=(format!("{server_url}/v1/widget.js")) defer=(true)></script>
+                                    <script
+                                        src=(format!("{server_url}/v1/widget.js"))
+                                        defer=(true)
+                                    ></script>
                                     <div
                                         id="bollwark-container"
                                         class="flex justify-center"
@@ -98,13 +129,22 @@ pub async fn local_login_page(
                                         data-mode="invisible"
                                     ></div>
                                 }
-                                <button type="submit" class="btn btn-primary w-full transition-transform duration-150 hover:-translate-y-0.5 active:translate-y-0">
+                                <button
+                                    type="submit"
+                                    class="btn btn-primary w-full transition-transform duration-150 hover:-translate-y-0.5 active:translate-y-0"
+                                >
                                     spinner()
                                     (t("Continue"))
                                 </button>
                                 <div data-webauthn="" hidden=(true)>
-                                    <div class="divider text-xs text-base-content/40 my-1">(t("or"))</div>
-                                    <button type="button" data-action="passkey" class="btn btn-outline w-full gap-2 transition-transform duration-150 hover:-translate-y-0.5 active:translate-y-0">
+                                    <div class="divider text-xs text-base-content/40 my-1">
+                                        (t("or"))
+                                    </div>
+                                    <button
+                                        type="button"
+                                        data-action="passkey"
+                                        class="btn btn-outline w-full gap-2 transition-transform duration-150 hover:-translate-y-0.5 active:translate-y-0"
+                                    >
                                         icon(d: FINGERPRINT, class: "h-5 w-5", stroke_width: "1.5")
                                         (t("Sign in with a passkey"))
                                     </button>
@@ -115,74 +155,180 @@ pub async fn local_login_page(
                             </form>
                         </div>
 
-                        <div data-step="passkey" hidden=(true) class="animate-step-in text-center space-y-4 py-4">
-                            <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary animate-pulse-glow">
+                        <div
+                            data-step="passkey"
+                            hidden=(true)
+                            class="animate-step-in text-center space-y-4 py-4"
+                        >
+                            <div
+                                class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary animate-pulse-glow"
+                            >
                                 icon(d: FINGERPRINT, class: "h-8 w-8", stroke_width: "1.5")
                             </div>
-                            <p class="font-medium">(t("Waiting for authentication..."))</p>
-                            <p class="text-sm text-base-content/50">(t("Follow the prompt from your browser or device."))</p>
+                            <p class="font-medium">
+                                (t("Waiting for authentication..."))
+                            </p>
+                            <p class="text-sm text-base-content/50">
+                                (t("Follow the prompt from your browser or device."))
+                            </p>
                             <div class="flex justify-center gap-2 mt-4">
-                                <button type="button" data-action="passkey-back" class="btn btn-ghost btn-sm">(t("Back"))</button>
-                                <button type="button" data-action="use-code" class="btn btn-ghost btn-sm">(t("Use email code instead"))</button>
+                                <button
+                                    type="button"
+                                    data-action="passkey-back"
+                                    class="btn btn-ghost btn-sm"
+                                >
+                                    (t("Back"))
+                                </button>
+                                <button
+                                    type="button"
+                                    data-action="use-code"
+                                    class="btn btn-ghost btn-sm"
+                                >
+                                    (t("Use email code instead"))
+                                </button>
                             </div>
                         </div>
 
-                        <div data-step="passkey-retry" hidden=(true) class="animate-step-in text-center space-y-4 py-4">
-                            <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-base-content/5 text-base-content/50">
+                        <div
+                            data-step="passkey-retry"
+                            hidden=(true)
+                            class="animate-step-in text-center space-y-4 py-4"
+                        >
+                            <div
+                                class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-base-content/5 text-base-content/50"
+                            >
                                 icon(d: FINGERPRINT, class: "h-8 w-8", stroke_width: "1.5")
                             </div>
-                            <p class="font-medium">(t("Passkey sign-in didn't work"))</p>
-                            <p class="text-sm text-base-content/50">(t("You can try again or use another way to sign in."))</p>
+                            <p class="font-medium">
+                                (t("Passkey sign-in didn't work"))
+                            </p>
+                            <p class="text-sm text-base-content/50">
+                                (t("You can try again or use another way to sign in."))
+                            </p>
                             <div class="flex flex-col gap-2">
-                                <button type="button" data-action="retry" class="btn btn-primary">(t("Try again"))</button>
-                                <button type="button" data-action="use-code" class="btn btn-ghost btn-sm">(t("Use email code instead"))</button>
-                                <button type="button" data-action="passkey-back" class="btn btn-ghost btn-sm">(t("Back"))</button>
+                                <button
+                                    type="button"
+                                    data-action="retry"
+                                    class="btn btn-primary"
+                                >
+                                    (t("Try again"))
+                                </button>
+                                <button
+                                    type="button"
+                                    data-action="use-code"
+                                    class="btn btn-ghost btn-sm"
+                                >
+                                    (t("Use email code instead"))
+                                </button>
+                                <button
+                                    type="button"
+                                    data-action="passkey-back"
+                                    class="btn btn-ghost btn-sm"
+                                >
+                                    (t("Back"))
+                                </button>
                             </div>
                         </div>
 
-                        <div data-step="offer" hidden=(true) class="animate-step-in text-center space-y-4 py-4">
-                            <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary">
+                        <div
+                            data-step="offer"
+                            hidden=(true)
+                            class="animate-step-in text-center space-y-4 py-4"
+                        >
+                            <div
+                                class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary"
+                            >
                                 icon(d: FINGERPRINT, class: "h-8 w-8", stroke_width: "1.5")
                             </div>
-                            <p class="font-medium">(t("Skip the email code next time"))</p>
-                            <p class="text-sm text-base-content/50">(t("Add a passkey to sign in with your fingerprint, face, or screen lock."))</p>
+                            <p class="font-medium">
+                                (t("Skip the email code next time"))
+                            </p>
+                            <p class="text-sm text-base-content/50">
+                                (t(
+                                    "Add a passkey to sign in with your fingerprint, face, or screen lock.",
+                                ))
+                            </p>
                             <div class="flex flex-col gap-2">
-                                <button type="button" data-action="offer-add" class="btn btn-primary">
+                                <button
+                                    type="button"
+                                    data-action="offer-add"
+                                    class="btn btn-primary"
+                                >
                                     spinner()
                                     (t("Add passkey"))
                                 </button>
-                                <button type="button" data-action="offer-skip" class="btn btn-ghost btn-sm">(t("Not now"))</button>
+                                <button
+                                    type="button"
+                                    data-action="offer-skip"
+                                    class="btn btn-ghost btn-sm"
+                                >
+                                    (t("Not now"))
+                                </button>
                             </div>
                         </div>
 
-                        <div data-step="tos" hidden=(true) class="animate-step-in space-y-4">
+                        <div
+                            data-step="tos"
+                            hidden=(true)
+                            class="animate-step-in space-y-4"
+                        >
                             <div class="text-center">
                                 <h2 class="text-lg font-semibold">(t("Almost there!"))</h2>
-                                <p class="text-sm text-base-content/70 mt-1">(t("Please review and accept our terms to continue."))</p>
+                                <p class="text-sm text-base-content/70 mt-1">
+                                    (t("Please review and accept our terms to continue."))
+                                </p>
                             </div>
                             <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" data-tos-check="" class="checkbox checkbox-primary">
+                                <input
+                                    type="checkbox"
+                                    data-tos-check=""
+                                    class="checkbox checkbox-primary"
+                                >
                                 <span class="label-text">
                                     (t("I agree to the "))
-                                    <a href="/legal/terms" target="_blank" class="link link-primary">(t("Terms of Service"))</a>
+                                    <a
+                                        href="/legal/terms"
+                                        target="_blank"
+                                        class="link link-primary"
+                                    >
+                                        (t("Terms of Service"))
+                                    </a>
                                     (t(" and "))
-                                    <a href="/legal/privacy" target="_blank" class="link link-primary">(t("Privacy Policy"))</a>
+                                    <a
+                                        href="/legal/privacy"
+                                        target="_blank"
+                                        class="link link-primary"
+                                    >
+                                        (t("Privacy Policy"))
+                                    </a>
                                 </span>
                             </label>
-                            <button type="button" data-action="tos-accept" class="btn btn-primary w-full">
+                            <button
+                                type="button"
+                                data-action="tos-accept"
+                                class="btn btn-primary w-full"
+                            >
                                 spinner()
                                 (t("Continue"))
                             </button>
                         </div>
 
-                        <div data-step="password" hidden=(true) class="animate-step-in space-y-4">
+                        <div
+                            data-step="password"
+                            hidden=(true)
+                            class="animate-step-in space-y-4"
+                        >
                             <div class="text-center">
-                                <p class="text-sm text-base-content/70">(t("Enter the password for"))</p>
+                                <p class="text-sm text-base-content/70">
+                                    (t("Enter the password for"))
+                                </p>
                                 <p class="font-medium text-sm" data-email=""></p>
                             </div>
                             <form data-form="password" class="space-y-4">
                                 <fieldset class="fieldset">
-                                    <label class="fieldset-label" for="oxidt-login-password">(t("Password"))</label>
+                                    <label class="fieldset-label" for="oxidt-login-password">
+                                        (t("Password"))
+                                    </label>
                                     <input
                                         id="oxidt-login-password"
                                         name="password"
@@ -199,20 +345,46 @@ pub async fn local_login_page(
                                 </button>
                             </form>
                             <div class="flex justify-between items-center text-sm">
-                                <button type="button" data-action="back" class="btn btn-ghost btn-sm text-base-content/50">(t("Back"))</button>
-                                <button type="button" data-action="use-code" class="btn btn-ghost btn-sm text-primary">(t("Email me a code instead"))</button>
+                                <button
+                                    type="button"
+                                    data-action="back"
+                                    class="btn btn-ghost btn-sm text-base-content/50"
+                                >
+                                    (t("Back"))
+                                </button>
+                                <button
+                                    type="button"
+                                    data-action="use-code"
+                                    class="btn btn-ghost btn-sm text-primary"
+                                >
+                                    (t("Email me a code instead"))
+                                </button>
                             </div>
                         </div>
 
-                        <div data-step="otp" hidden=(true) class="animate-step-in space-y-4">
+                        <div
+                            data-step="otp"
+                            hidden=(true)
+                            class="animate-step-in space-y-4"
+                        >
                             <div class="text-center">
-                                <div data-new-user="" hidden=(true) class="badge badge-success badge-outline mb-2">(t("Account created"))</div>
-                                <p class="text-sm text-base-content/70">(t("We sent a verification code to"))</p>
+                                <div
+                                    data-new-user=""
+                                    hidden=(true)
+                                    class="badge badge-success badge-outline mb-2"
+                                >
+                                    (t("Account created"))
+                                </div>
+                                <p class="text-sm text-base-content/70">
+                                    (t("We sent a verification code to"))
+                                </p>
                                 <p class="font-medium text-sm" data-email=""></p>
                             </div>
                             <form data-form="otp" class="space-y-4">
                                 <fieldset class="fieldset">
-                                    <label class="fieldset-label" for="oxidt-login-otp">(t("Verification code"))</label>
+                                    <label class="fieldset-label" for="oxidt-login-otp">
+                                        (t("Verification code"))
+                                    </label>
                                     <input
                                         id="oxidt-login-otp"
                                         name="otp"
@@ -231,33 +403,65 @@ pub async fn local_login_page(
                                 </button>
                             </form>
                             <div class="flex justify-between items-center text-sm">
-                                <button type="button" data-action="back" class="btn btn-ghost btn-sm text-base-content/50">(t("Back"))</button>
-                                <button type="button" data-action="resend" class="btn btn-ghost btn-sm text-primary">(t("Resend code"))</button>
+                                <button
+                                    type="button"
+                                    data-action="back"
+                                    class="btn btn-ghost btn-sm text-base-content/50"
+                                >
+                                    (t("Back"))
+                                </button>
+                                <button
+                                    type="button"
+                                    data-action="resend"
+                                    class="btn btn-ghost btn-sm text-primary"
+                                >
+                                    (t("Resend code"))
+                                </button>
                             </div>
                         </div>
 
-                        <div data-step="verifying" hidden=(true) class="animate-step-in text-center space-y-4 py-4">
-                            <span class="loading loading-spinner loading-lg text-primary"></span>
+                        <div
+                            data-step="verifying"
+                            hidden=(true)
+                            class="animate-step-in text-center space-y-4 py-4"
+                        >
+                            <span
+                                class="loading loading-spinner loading-lg text-primary"
+                            ></span>
                             <p class="text-base-content/70">(t("Verifying..."))</p>
                         </div>
 
-                        <div data-step="success" hidden=(true) class="animate-step-in text-center space-y-4 py-4">
+                        <div
+                            data-step="success"
+                            hidden=(true)
+                            class="animate-step-in text-center space-y-4 py-4"
+                        >
                             <div class="text-success text-4xl mb-2">
-                                icon(d: CHECK_CIRCLE, class: "h-12 w-12 mx-auto", stroke_width: "2")
+                                icon(
+                                    d: CHECK_CIRCLE,
+                                    class: "h-12 w-12 mx-auto",
+                                    stroke_width: "2"
+                                )
                             </div>
                             <p class="font-medium">(t("Login successful!"))</p>
-                            <p class="text-sm text-base-content/50">(t("Redirecting..."))</p>
+                            <p class="text-sm text-base-content/50">
+                                (t("Redirecting..."))
+                            </p>
                             <span class="loading loading-spinner loading-sm"></span>
                         </div>
                     </fieldset>
 
-                    <div class="mt-6 flex items-center justify-center gap-1.5 text-xs text-base-content/40">
+                    <div
+                        class="mt-6 flex items-center justify-center gap-1.5 text-xs text-base-content/40"
+                    >
                         icon(d: LOCK, class: "h-3.5 w-3.5", stroke_width: "1.5")
                         <span>(t("Secured with passkeys & encryption"))</span>
                     </div>
                 </div>
             </div>
-            <script id="oxidt-login-i18n" type="application/json">(Trusted(catalog))</script>
+            <script id="oxidt-login-i18n" type="application/json">
+                (Trusted(catalog))
+            </script>
             <script>(Trusted(SCRIPT))</script>
         </div>
     })

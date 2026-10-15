@@ -18,6 +18,12 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Install Topcoat CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: topcoat-cli@0.10.0
+      - name: Check Topcoat formatting
+        run: topcoat fmt --check --rustfmt crates/oxidt-auth/src/topcoat.rs crates/oxidt-auth/src/topcoat
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
