@@ -5,5 +5,6 @@ const html = `<!doctype html><meta charset="utf-8"><style>body{max-width:700px;m
 Bun.serve({ hostname: '127.0.0.1', port: 4197, fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/editor.js') return new Response(Bun.file('assets/markdown-editor.js'), { headers: { 'content-type': 'text/javascript' } });
-    return new Response(html + (url.searchParams.has('fallback') ? '' : '<script type="module" src="/editor.js"></script>'), { headers: { 'content-type': 'text/html' } });
+    const page = url.searchParams.has('labels') ? html.replace('<textarea id="body"', `<textarea data-labels='{"heading-1":"Überschrift 1"}' id="body"`) : html;
+    return new Response(page + (url.searchParams.has('fallback') ? '' : '<script type="module" src="/editor.js"></script>'), { headers: { 'content-type': 'text/html' } });
 } });

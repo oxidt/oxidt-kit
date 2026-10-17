@@ -330,8 +330,13 @@ export function mountEditor(textarea, host) {
             placeholder(textarea.placeholder), EditorView.contentAttributes.of(attributes),
         ];
     };
+    // CodeMirror lives in a shadow root: frameworks that patch server HTML in
+    // place (Topcoat shards, live updates) see an empty host on both sides
+    // and leave the editor alone.
+    const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const view = new EditorView({
-        parent: host,
+        parent: root,
+        root,
         doc: textarea.value,
         selection: { anchor: textarea.selectionStart, head: textarea.selectionEnd },
         extensions: [
@@ -340,7 +345,7 @@ export function mountEditor(textarea, host) {
             new LanguageSupport(new Language(commonmarkLanguage.data, commonmarkLanguage.parser.configure([Strikethrough, Table, TaskList]), [], "markdown")),
             Prec.high(keymap.of(markdownKeymap)),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(controlled()),
-            autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
+            autocompletion({ override: [slashCommands(commandLabels(textarea))], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
             EditorView.lineWrapping, theme, livePreview, focusState, blockPreview,
             EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)),
             EditorState.transactionFilter.of(transaction => {
@@ -357,10 +362,19 @@ export function mountEditor(textarea, host) {
         ],
     });
     const hadFocus = document.activeElement === textarea;
-    const wasHidden = textarea.hidden;
-    host.hidden = wasHidden;
-    textarea.hidden = true;
+    // The stylesheet hides the textarea (an attribute would be reverted by a
+    // framework re-render); a field hidden by its author keeps the editor hidden.
+    host.hidden = textarea.hidden;
     if (hadFocus) view.focus();
+    // A re-render may replace the textarea's text, which changes a pristine
+    // field's value without the setter. Follow it unless the user has edited.
+    let pristine = textarea.value;
+    const follow = new MutationObserver(() => {
+        const value = native.get.call(textarea);
+        if (view.state.doc.toString() === pristine && value !== pristine) api.setValue(value, false);
+        pristine = value;
+    });
+    follow.observe(textarea, { childList: true, characterData: true, subtree: true });
     const observer = new MutationObserver(records => {
         if (records.some(record => record.target === textarea || record.target.localName === "fieldset")) {
             view.dispatch({ effects: controls.reconfigure(controlled()) });
@@ -390,13 +404,13 @@ export function mountEditor(textarea, host) {
         show(visible) { host.hidden = !visible; if (visible) view.focus(); },
         destroy() {
             observer.disconnect();
+            follow.disconnect();
             clearTimeout(resetTimer);
             document.removeEventListener("reset", reset, true);
             delete textarea.value;
             textarea.removeEventListener("invalid", focus);
             labels.forEach(label => label.removeEventListener("click", focus));
             view.destroy();
-            textarea.hidden = wasHidden;
         },
     };
     // Programmatic writes, including a framework's controlled value, update
@@ -416,9 +430,29 @@ export function mountEditor(textarea, host) {
     return api;
 }
 
+/// `data-labels` on the textarea: a JSON object of slash-command labels.
+function commandLabels(textarea) {
+    try {
+        const labels = JSON.parse(textarea.dataset.labels || "{}");
+        return labels && typeof labels === "object" ? labels : {};
+    } catch { return {}; }
+}
+
+// Layout and the hidden textarea come from a stylesheet rather than inline
+// styles or attributes, which a framework's in-place re-render would undo.
+function installStyles() {
+    if (document.getElementById("oxidt-markdown-editor-styles")) return;
+    const style = document.createElement("style");
+    style.id = "oxidt-markdown-editor-styles";
+    style.textContent = "oxidt-markdown-editor{display:block;min-width:0}" +
+        "oxidt-markdown-editor:defined:has(> [data-editor-host]) > textarea{display:none}";
+    document.head.append(style);
+}
+
 // Explicit host children keep framework-owned nodes separate from CodeMirror's
 // DOM. Disconnect cleanup also covers Dioxus navigation and Topcoat fragments.
 if (typeof customElements !== "undefined" && !customElements.get("oxidt-markdown-editor")) {
+    installStyles();
     customElements.define("oxidt-markdown-editor", class extends HTMLElement {
         connectedCallback() {
             queueMicrotask(() => {
@@ -426,8 +460,6 @@ if (typeof customElements !== "undefined" && !customElements.get("oxidt-markdown
                 const textarea = this.querySelector("textarea");
                 const host = this.querySelector("[data-editor-host]");
                 if (!textarea || !host) return;
-                this.style.display = "block";
-                this.style.minWidth = "0";
                 this.editor = mountEditor(textarea, host);
             });
         }

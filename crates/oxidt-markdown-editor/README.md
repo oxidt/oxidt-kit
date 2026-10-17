@@ -21,6 +21,16 @@ Commands: `/heading-1`, `/heading-2`, `/heading-3`, `/bullet-list`,
 inserts a fenced block with the cursor inside it. The diagram command inserts
 an editable Mermaid flowchart.
 
+## Labels
+
+The slash menu shows an English label beside each command. Translate them with
+a `data-labels` JSON object on the textarea, keyed by command name; missing
+keys keep the English label. The typed command names stay English:
+
+```html
+<textarea data-labels='{"heading-1":"Überschrift 1","bullet-list":"Aufzählung"}'></textarea>
+```
+
 ## Diagrams
 
 Fenced `mermaid` blocks render locally as SVG using [Pele](https://pele.run/):
@@ -62,7 +72,12 @@ view! {
 Use Topcoat's usual asset bundling and `.assets(AssetBundle::load()?)` setup.
 The component renders a module script with a content-hashed asset URL and an
 escaped textarea. Without JavaScript, ordinary form submission still works.
-The component needs no Topcoat runtime signals, shards, or WebSocket connection.
+The component needs no Topcoat runtime signals, shards, or WebSocket connection,
+and it works inside them: CodeMirror renders into a shadow root and the
+textarea is hidden by a stylesheet, so a shard or live update that patches the
+page in place leaves the editor intact. If the re-rendered text changes while
+the user has not edited the field, the editor follows it; edits in progress are
+kept.
 
 ## Dioxus
 

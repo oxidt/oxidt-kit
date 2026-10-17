@@ -3,7 +3,9 @@ import { isolateHistory } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 
-const commands = [
+// The typed command names stay English; `detail` is the shown, translatable
+// label (see `labels` in the README).
+const defaults = [
     ["heading-1", "Heading 1", "# "],
     ["heading-2", "Heading 2", "## "],
     ["heading-3", "Heading 3", "### "],
@@ -13,9 +15,11 @@ const commands = [
     ["quote", "Quote", "> "],
     ["code", "Code block", "```\n\n```", 4],
     ["diagram", "Mermaid diagram", "```mermaid\nflowchart LR\n    A --> B\n```", 10],
-].map(([name, detail, insert, cursor = insert.length]) => ({
+];
+
+const command = labels => ([name, detail, insert, cursor = insert.length]) => ({
     label: "/" + name,
-    detail,
+    detail: typeof labels[name] === "string" && labels[name] ? labels[name] : detail,
     apply(view, completion, from, to) {
         if (view.state.readOnly || !view.state.facet(EditorView.editable)) return;
         view.dispatch({
@@ -26,11 +30,18 @@ const commands = [
             annotations: [pickedCompletion.of(completion), isolateHistory.of("full")],
         });
     },
-}));
+});
+
+/// The completion source, with `labels` mapping command names to the text
+/// shown beside them (e.g. `{ "heading-1": "Überschrift 1" }`).
+export function slashCommands(labels = {}) {
+    const commands = defaults.map(command(labels));
+    return context => slashSource(commands, context);
+}
 
 // Only a command on its own line opens the menu. Paths, URLs, selections,
 // and Markdown inside code or HTML keep their ordinary typing behavior.
-export function slashCommands({ state, pos }) {
+function slashSource(commands, { state, pos }) {
     if (state.readOnly || !state.facet(EditorView.editable) ||
         state.selection.ranges.length !== 1 || !state.selection.main.empty) return null;
     const line = state.doc.lineAt(pos);

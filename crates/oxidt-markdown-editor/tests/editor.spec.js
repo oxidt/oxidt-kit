@@ -286,3 +286,39 @@ test('reset still applies after the field moves to another form', async ({ page 
     await expect(source(page)).toHaveValue('# Original\n\n**Text**');
     await expect(page.locator('.md-h1')).toHaveText('Original');
 });
+
+// Frameworks such as Topcoat patch server HTML into the live page: they drop
+// attributes and inline styles the server did not render and rewrite text.
+test('an in-place re-render keeps the editor working and the textarea hidden', async ({ page }) => {
+    await write(page, '# Kept');
+    await page.evaluate(() => {
+        const el = document.querySelector('oxidt-markdown-editor');
+        el.removeAttribute('style');
+        const textarea = el.querySelector('textarea');
+        textarea.removeAttribute('hidden');
+        el.querySelector('[data-editor-host]').replaceChildren();
+    });
+    await expect(source(page)).toBeHidden();
+    await expect(field(page)).toBeVisible();
+    await expect(page.locator('.md-h1')).toContainText('Kept');
+    await page.keyboard.insertText('!');
+    await expect(source(page)).toHaveValue('# Kept!');
+});
+
+test('a pristine field follows re-rendered server text; an edited one keeps the user\'s text', async ({ page }) => {
+    await source(page).evaluate(el => { el.textContent = '# From server'; });
+    await expect(page.locator('.md-h1')).toHaveText('From server');
+    await expect(source(page)).toHaveValue('# From server');
+    await write(page, '# Mine');
+    await source(page).evaluate(el => { el.textContent = '# Newer from server'; });
+    await expect(source(page)).toHaveValue('# Mine');
+});
+
+test('slash-command labels can be translated', async ({ page }) => {
+    await page.goto('/?labels');
+    await field(page).focus();
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.insertText('/head');
+    await expect(page.getByText('Überschrift 1')).toBeVisible();
+    await expect(page.getByText('Heading 2', { exact: true })).toBeVisible();
+});
