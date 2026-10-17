@@ -97,7 +97,11 @@ name = "oxidt-auth"
 # 0.16.0 adds `topcoat::ferriskey_login_page`, the FerrisKey `LoginPage` as a
 # Topcoat component (`topcoat` alone, no `local-login`). Additive. (0.15.0 is
 # taken by a tag cut off a side commit.)
-version = "0.16.0"
+# 0.16.1 closes an open redirect: `is_safe_redirect_url` now rejects any
+# control character or whitespace, since browsers strip tab/CR/LF before
+# parsing and turned `/%09/evil.com` into `//evil.com`. Security fix, no API
+# change; every app should move to this pin.
+version = "0.16.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -32,7 +32,14 @@ pub struct AuthUserInfo {
 ///
 /// Browsers normalize `\` to `/` while parsing an authority, so `/\evil.com`
 /// reaches the same off-site host that `//evil.com` would — reject both forms.
+/// They also strip tab, CR and LF (and trim leading/trailing C0 controls and
+/// space) before parsing, so `/\t/evil.com` becomes `//evil.com`. No legitimate
+/// in-app path contains such bytes, so reject any control character or
+/// whitespace outright rather than trying to mirror the browser's stripping.
 pub(crate) fn is_safe_redirect_url(url: &str) -> bool {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
     let mut chars = url.chars();
     chars.next() == Some('/') && !matches!(chars.next(), Some('/' | '\\'))
 }
@@ -536,6 +543,21 @@ mod tests {
         // Browsers read `\` as `/` in the authority, so these are off-site too.
         assert!(!is_safe_redirect_url("/\\evil.com"));
         assert!(!is_safe_redirect_url("/\\/evil.com"));
+    }
+
+    #[test]
+    fn redirect_url_rejects_control_chars_and_whitespace() {
+        // Browsers strip tab, CR and LF while parsing a URL, so `/\t/evil.com`
+        // (sent as `/%09/evil.com`) resolves to `//evil.com`.
+        assert!(!is_safe_redirect_url("/\t/evil.com"));
+        assert!(!is_safe_redirect_url("/\n/evil.com"));
+        assert!(!is_safe_redirect_url("/\r/evil.com"));
+        assert!(!is_safe_redirect_url("/ /evil.com"));
+        assert!(!is_safe_redirect_url("/dashboard\n"));
+        assert!(!is_safe_redirect_url("/\u{7f}/evil.com"));
+
+        assert!(is_safe_redirect_url("/dashboard"));
+        assert!(is_safe_redirect_url("/w/x?y=1"));
     }
 
     fn v(items: &[&str]) -> Vec<String> {
