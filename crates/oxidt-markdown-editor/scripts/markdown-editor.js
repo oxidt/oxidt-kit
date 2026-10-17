@@ -6,6 +6,48 @@ import { commonmarkLanguage, markdownKeymap } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, TaskList } from "@lezer/markdown";
 import { autocompletion } from "@codemirror/autocomplete";
 import { slashCommands } from "./slash-commands.js";
+import { PeleError, render as renderDiagram } from "pele";
+
+function diagramSource(state, node) {
+    const info = node.getChild("CodeInfo");
+    if (!info || state.sliceDoc(info.from, info.to).trim() !== "mermaid" || node.getChildren("CodeMark").length !== 2) return null;
+    return node.getChildren("CodeText").map(text => state.sliceDoc(text.from, text.to)).join("");
+}
+
+let diagramId = 0;
+class DiagramWidget extends WidgetType {
+    constructor(source) { super(); this.source = source; }
+    eq(other) { return other.source === this.source; }
+    toDOM(view) {
+        const diagram = document.createElement("div");
+        diagram.className = "md-diagram";
+        diagram.title = "Click to edit diagram";
+        try {
+            diagram.innerHTML = renderDiagram(this.source, {
+                fontFamily: getComputedStyle(view.dom).fontFamily,
+                idPrefix: "md-diagram-" + ++diagramId,
+                links: false,
+                images: false,
+            }).svg;
+        } catch (error) {
+            if (!(error instanceof PeleError)) throw error;
+            const message = document.createElement("div");
+            message.className = "md-diagram-error";
+            message.textContent = "Diagram: " + error.message;
+            const source = document.createElement("pre");
+            source.textContent = this.source;
+            diagram.append(message, source);
+        }
+        diagram.addEventListener("mousedown", event => {
+            event.preventDefault();
+            const from = view.posAtDOM(diagram);
+            view.dispatch({ selection: { anchor: from } });
+            view.focus();
+        });
+        return diagram;
+    }
+    ignoreEvent() { return true; }
+}
 
 class Bullet extends WidgetType {
     toDOM() {
@@ -144,6 +186,7 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
                 }
             } else if (name === "FencedCode" || name === "CodeBlock") {
                 lines(from, to, "md-code-line");
+                if (name === "FencedCode" && diagramSource(state, node) !== null && editing(from, to)) return false;
                 for (let child = node.firstChild; child; child = child.nextSibling) {
                     if (child.name === "CodeMark" || child.name === "CodeInfo") hide(child.from, child.to);
                 }
@@ -158,7 +201,7 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
 }
 
 // Block widgets may span line breaks, which view plugins cannot replace, so
-// tables come from a state field. Focus is mirrored into state for the same rule.
+// tables and diagrams come from a state field. Focus is mirrored into state.
 const setFocus = StateEffect.define();
 const focusState = StateField.define({
     create: () => false,
@@ -168,15 +211,21 @@ const focusState = StateField.define({
     },
 });
 
-export function tables(state, focused) {
+export function blocks(state, focused) {
     const result = [];
     const active = activeLines(state, focused);
     syntaxTree(state).iterate({
         enter({ node, name, from, to }) {
-            if (name !== "Table") return;
+            if (name !== "Table" && name !== "FencedCode") return;
+            const source = name === "FencedCode" ? diagramSource(state, node) : null;
+            if (name === "FencedCode" && source === null) return false;
             const start = state.doc.lineAt(from).from;
             const end = state.doc.lineAt(state.sliceDoc(to - 1, to) === "\n" ? to - 1 : to).to;
             if (active.some(range => start <= range.to && end >= range.from)) return false;
+            if (source !== null) {
+                result.push(Decoration.replace({ widget: new DiagramWidget(source), block: true }).range(start, end));
+                return false;
+            }
             const rows = [];
             for (let row = node.firstChild; row; row = row.nextSibling) {
                 if (row.name !== "TableHeader" && row.name !== "TableRow") continue;
@@ -189,13 +238,13 @@ export function tables(state, focused) {
     return Decoration.set(result);
 }
 
-const tablePreview = StateField.define({
-    create: state => tables(state, false),
+const blockPreview = StateField.define({
+    create: state => blocks(state, false),
     update(value, transaction) {
         const focused = transaction.state.field(focusState);
         if (transaction.docChanged || transaction.selection || focused !== transaction.startState.field(focusState) ||
             syntaxTree(transaction.startState) !== syntaxTree(transaction.state)) {
-            return tables(transaction.state, focused);
+            return blocks(transaction.state, focused);
         }
         return value;
     },
@@ -235,6 +284,20 @@ const theme = EditorView.theme({
     ".md-table": { borderCollapse: "collapse", margin: "0.25rem 0", cursor: "text" },
     ".md-table th, .md-table td": { border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", padding: "0.25rem 0.65rem", textAlign: "left" },
     ".md-table th": { fontWeight: "650", backgroundColor: "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))" },
+    ".md-diagram": {
+        margin: "0.5rem 0", cursor: "text", overflowX: "auto",
+        "--pele-bg": "var(--md-editor-background, var(--color-base-100, #fff))",
+        "--pele-fg": "var(--md-editor-color, var(--color-base-content, #202936))",
+        "--pele-muted": "var(--pele-fg)",
+        "--pele-line": "var(--pele-fg)",
+        "--pele-surface": "var(--md-editor-code-background, var(--color-base-200, #f1f3f5))",
+        "--pele-surface-alt": "var(--pele-surface)",
+        "--pele-border": "var(--md-editor-border, var(--color-base-300, #d1d5db))",
+        "--pele-accent": "var(--md-editor-accent, var(--color-primary, #146ade))",
+    },
+    ".md-diagram svg": { display: "block", maxWidth: "100%", height: "auto" },
+    ".md-diagram pre": { whiteSpace: "pre-wrap", fontFamily: "ui-monospace, monospace" },
+    ".md-diagram-error": { color: "var(--color-error, #b42318)" },
     ".md-bullet": { display: "inline-block", width: "0.7em", textAlign: "center", color: "var(--md-editor-accent, var(--color-primary, #146ade))" },
     ".cm-tooltip-autocomplete": { fontFamily: "inherit", backgroundColor: "var(--md-editor-background, var(--color-base-100, #fff))", color: "var(--md-editor-color, var(--color-base-content, #202936))", border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", borderRadius: "0.5rem", overflow: "hidden", boxShadow: "0 4px 16px #0002" },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "inherit", maxHeight: "min(20rem, 50vh)" },
@@ -278,7 +341,7 @@ export function mountEditor(textarea, host) {
             Prec.high(keymap.of(markdownKeymap)),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(controlled()),
             autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
-            EditorView.lineWrapping, theme, livePreview, focusState, tablePreview,
+            EditorView.lineWrapping, theme, livePreview, focusState, blockPreview,
             EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)),
             EditorState.transactionFilter.of(transaction => {
                 const limit = textarea.maxLength;

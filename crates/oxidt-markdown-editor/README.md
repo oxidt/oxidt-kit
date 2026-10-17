@@ -1,7 +1,7 @@
 # oxidt-markdown-editor
 
 A Markdown writing field with live formatting, shared by Topcoat and Dioxus.
-Headings, emphasis, links, lists, code blocks, images and tables render in
+Headings, emphasis, links, lists, code blocks, images, tables and diagrams render in
 place. Syntax stays visible on selected lines and reappears when the cursor
 returns to a line; clicking a rendered table moves the cursor into its source.
 The underlying value is always Markdown. Table cells show their source text.
@@ -17,8 +17,28 @@ the menu and leaves the typed text intact. Commands also stay literal in code
 blocks. Inserting a command is one undo step and updates the form value normally.
 
 Commands: `/heading-1`, `/heading-2`, `/heading-3`, `/bullet-list`,
-`/numbered-list`, `/task-list`, `/quote`, and `/code`. The code command inserts
-a fenced block with the cursor inside it.
+`/numbered-list`, `/task-list`, `/quote`, `/code`, and `/diagram`. The code command
+inserts a fenced block with the cursor inside it. The diagram command inserts
+an editable Mermaid flowchart.
+
+## Diagrams
+
+Fenced `mermaid` blocks render locally as SVG using [Pele](https://pele.run/):
+
+````markdown
+```mermaid
+flowchart LR
+    A[Draft] --> B[Published]
+```
+````
+
+Click a diagram or move the cursor into its block to edit the source. Leaving
+the block restores the preview. Invalid diagrams show an error and their source;
+unclosed fences stay as code. The saved value remains ordinary Markdown.
+
+Diagrams inherit the editor's colors and fit its width. Links and external images
+inside diagrams are disabled in previews. Pele is included in the shared bundle;
+no CDN or separate setup is needed in either framework.
 
 ## Topcoat
 

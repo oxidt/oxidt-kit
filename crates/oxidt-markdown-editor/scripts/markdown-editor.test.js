@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { EditorState } from "@codemirror/state";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
 import { Table } from "@lezer/markdown";
-import { decorations, tables } from "./markdown-editor.js";
+import { decorations, blocks } from "./markdown-editor.js";
 
 function render(doc, selection, focused = true, visible) {
     const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage })] });
@@ -71,10 +71,10 @@ test("every visible range is decorated when a block widget splits the viewport",
     expect(ranges.filter(range => range.class === "md-strong").map(range => range.from)).toEqual([0, 16]);
 });
 
-function tableRanges(doc, selection, focused = true) {
+function blockRanges(doc, selection, focused = true) {
     const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage, extensions: [Table] })] });
     const ranges = [];
-    for (let cursor = tables(state, focused).iter(); cursor.value; cursor.next()) {
+    for (let cursor = blocks(state, focused).iter(); cursor.value; cursor.next()) {
         ranges.push({ from: cursor.from, to: cursor.to, ...cursor.value.spec });
     }
     return ranges;
@@ -83,11 +83,41 @@ function tableRanges(doc, selection, focused = true) {
 test("tables render as a block and reveal their Markdown when editing", () => {
     const table = "| Plan | Price |\n| --- | --- |\n| Pro | **$9** |";
     const doc = "Intro\n\n" + table + "\n\nAfter";
-    const [block] = tableRanges(doc, { anchor: 0 });
+    const [block] = blockRanges(doc, { anchor: 0 });
     expect(block).toMatchObject({ from: 7, to: 7 + table.length, block: true });
     expect(block.widget.rows).toEqual([["Plan", "Price"], ["Pro", "**$9**"]]);
-    expect(tableRanges(doc, { anchor: 7 + table.length })).toEqual([]);
-    expect(tableRanges(doc, { anchor: 7 + table.length }, false)).toHaveLength(1);
+    expect(blockRanges(doc, { anchor: 7 + table.length })).toEqual([]);
+    expect(blockRanges(doc, { anchor: 7 + table.length }, false)).toHaveLength(1);
+});
+
+test("Mermaid fences render as blocks and expose the entire source when selected", () => {
+    const diagram = "```mermaid\nflowchart LR\n    A --> B\n```";
+    const doc = "Intro\n\n" + diagram + "\n\nAfter";
+    const [block] = blockRanges(doc, { anchor: 0 });
+    expect(block).toMatchObject({ from: 7, to: 7 + diagram.length, block: true });
+    expect(block.widget.source).toBe("flowchart LR\n    A --> B");
+    for (const anchor of [7, 20, 7 + diagram.length]) {
+        expect(blockRanges(doc, { anchor })).toEqual([]);
+        expect(render(doc, { anchor }).hidden).toEqual([]);
+    }
+    expect(blockRanges(doc, { anchor: 0, head: doc.length })).toEqual([]);
+    expect(blockRanges(doc, { anchor: 20 }, false)).toHaveLength(1);
+});
+
+test("diagram extraction supports tilde fences and nested Markdown containers", () => {
+    for (const doc of [
+        "~~~mermaid\nflowchart LR\n  A-->B\n~~~",
+        "> ```mermaid\n> flowchart LR\n>   A-->B\n> ```",
+        "- ```mermaid\n  flowchart LR\n    A-->B\n  ```",
+    ]) {
+        expect(blockRanges(doc, { anchor: 0 }, false)[0].widget.source).toBe("flowchart LR\n  A-->B");
+    }
+});
+
+test("ordinary, unclosed, and indented fences stay code", () => {
+    for (const doc of ["```js\nflowchart LR\n A-->B\n```", "```mermaid\nflowchart LR", "    ```mermaid\n    flowchart LR\n    ```"]) {
+        expect(blockRanges(doc, { anchor: 0 }, false)).toEqual([]);
+    }
 });
 
 test("multiline emphasis never hides a line break", () => {

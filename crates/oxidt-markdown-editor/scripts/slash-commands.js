@@ -12,6 +12,7 @@ const commands = [
     ["task-list", "Task list", "- [ ] "],
     ["quote", "Quote", "> "],
     ["code", "Code block", "```\n\n```", 4],
+    ["diagram", "Mermaid diagram", "```mermaid\nflowchart LR\n    A --> B\n```", 10],
 ].map(([name, detail, insert, cursor = insert.length]) => ({
     label: "/" + name,
     detail,

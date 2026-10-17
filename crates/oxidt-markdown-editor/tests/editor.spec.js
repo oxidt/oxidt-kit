@@ -115,7 +115,7 @@ for (const [command, markdown] of [
 
 test('slash menu filters, supports arrow keys, and undoes one insertion', async ({ page }) => {
     await write(page, '/');
-    await expect(page.getByRole('option')).toHaveCount(8);
+    await expect(page.getByRole('option')).toHaveCount(9);
     await page.keyboard.insertText('heading');
     await expect(page.getByRole('option')).toHaveCount(3);
     await page.keyboard.press('ArrowDown');
@@ -176,6 +176,74 @@ test('tables and images render until the cursor enters them', async ({ page }) =
     await expect(page.locator('.md-table')).toHaveCount(1);
     await expect(page.locator('img.md-image')).toHaveCount(0);
     await expect(source(page)).toHaveValue(markdown);
+});
+
+test('diagram command inserts editable Mermaid and undoes in one step', async ({ page }) => {
+    await write(page, '/diagram');
+    await expect(page.getByRole('option')).toHaveCount(1);
+    await page.keyboard.press('Enter');
+    await expect(source(page)).toHaveValue('```mermaid\nflowchart LR\n    A --> B\n```');
+    await expect(field(page)).toContainText('```mermaid');
+    expect(await source(page).evaluate(el => el.selectionStart)).toBe(10);
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(source(page)).toHaveValue('/diagram');
+});
+
+test('diagrams render, reveal their source, update after editing, and preserve form values', async ({ page }) => {
+    const markdown = 'Before\n\n```mermaid\nflowchart LR\n    A[Draft] --> B[Published]\n```\n\nAfter';
+    await source(page).evaluate((el, text) => { el.value = text; }, markdown);
+    await expect(page.locator('.md-diagram svg')).toBeVisible();
+    await expect(page.locator('.md-diagram')).toContainText('Published');
+    await page.locator('.md-diagram').click();
+    await expect(page.locator('.md-diagram')).toHaveCount(0);
+    await expect(field(page)).toContainText('```mermaid');
+    await expect(source(page)).toHaveValue(markdown);
+    await page.keyboard.press('ControlOrMeta+End');
+    await expect(page.locator('.md-diagram svg')).toBeVisible();
+    const updated = markdown.replace('Published', 'Done');
+    await source(page).evaluate((el, text) => { el.value = text; }, updated);
+    await expect(page.locator('.md-diagram')).toContainText('Done');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    expect(await page.evaluate(() => new FormData(document.querySelector('form')).get('body'))).toBe(updated);
+    expect(await page.evaluate(() => window.inputs)).toBe(0);
+});
+
+test('invalid diagrams show safe text and can be corrected', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const invalid = '```mermaid\nnot a diagram <img src=x onerror=alert(1)>\n```';
+    await source(page).evaluate((el, text) => { el.value = text; }, invalid);
+    await expect(page.locator('.md-diagram-error')).toBeVisible();
+    await expect(page.locator('.md-diagram pre')).toContainText('<img src=x onerror=alert(1)>');
+    await expect(page.locator('.md-diagram img')).toHaveCount(0);
+    await page.locator('.md-diagram').click();
+    await expect(field(page)).toContainText('```mermaid');
+    await write(page, '```mermaid\nsequenceDiagram\n    Alice->>Bob: Hello\n```');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.locator('.md-diagram svg.pele-sequence')).toBeVisible();
+    await expect(page.locator('.md-diagram-error')).toHaveCount(0);
+    expect(errors).toEqual([]);
+});
+
+test('diagram previews fit narrow editors, inherit colors, and do not navigate', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 740 });
+    await page.locator('oxidt-markdown-editor').evaluate(el => {
+        el.style.setProperty('--md-editor-color', '#eeeeee');
+        el.style.setProperty('--md-editor-background', '#111111');
+        el.style.setProperty('--md-editor-code-background', '#333333');
+    });
+    await source(page).evaluate(el => {
+        el.value = '```mermaid\nflowchart LR\n A[First step] --> B[Second step] --> C[Third step] --> D[Last step]\n click A "https://example.com"\n```';
+    });
+    const svg = page.locator('.md-diagram svg');
+    await expect(svg).toBeVisible();
+    await expect(svg.locator('a')).toHaveCount(0);
+    await expect(svg).toHaveCSS('color', 'rgb(238, 238, 238)');
+    const size = await svg.boundingBox();
+    const editor = await page.locator('.cm-editor').boundingBox();
+    expect(size.width).toBeLessThanOrEqual(editor.width);
+    await page.locator('oxidt-markdown-editor').evaluate(el => el.style.setProperty('--md-editor-color', '#222222'));
+    await expect(svg).toHaveCSS('color', 'rgb(34, 34, 34)');
 });
 
 test('a disabled fieldset disables the editor', async ({ page }) => {
