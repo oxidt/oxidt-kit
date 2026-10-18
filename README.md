@@ -24,6 +24,7 @@ are tagged `oxidt-*-v*`.
 | [`oxidt-egress`](crates/oxidt-egress) | outbound HTTP to user-supplied URLs without becoming a proxy into the private network — https-only URL policy, address checks, DNS pinning, manual redirects |
 | [`oxidt-caldav`](crates/oxidt-caldav) | CalDAV/WebDAV for apps that write a user's own calendar — discovery, create-only or overwrite PUT, WebDAV folder check, VTODO/VEVENT bodies; every request through `oxidt-egress` |
 | [`oxidt-mcp-oauth`](crates/oxidt-mcp-oauth) | the OAuth 2.1 authorization-server core for an MCP endpoint — discovery metadata, dynamic client registration, PKCE authorization code and the validation rules; storage, sessions and the consent page stay in the app |
+| [`oxidt-agent-setup`](crates/oxidt-agent-setup) | the response contract for agent-driven setup over MCP — `Setup` (resource, env vars, install snippets, human-only steps as URLs) and `Verification` (first event received yet) |
 
 All are storage-agnostic: no database dependency, no ORM types in any public
 signature. `oxidt-auth` reaches storage through the `AuthUserStore`,
@@ -51,6 +52,7 @@ oxidt-creem = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-cre
 oxidt-egress = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-egress-v0.1.0" }
 oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
 oxidt-mcp-oauth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-oauth-v0.1.0" }
+oxidt-agent-setup = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-agent-setup-v0.1.0" }
 ```
 
 `oxidt-egress` is for apps that need only egress. An app using both depends on
