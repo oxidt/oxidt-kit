@@ -31,6 +31,10 @@ pub struct Setup {
     pub env: Vec<EnvVar>,
     /// Code to add to the codebase, one entry per target the app supports.
     pub install: Vec<Snippet>,
+    /// Existing SDKs that already accept these env vars, e.g. `sentry`. When
+    /// the repo has one, the agent configures it instead of adding a snippet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_with: Vec<String>,
     /// Steps only the user can do. Empty when setup is complete.
     pub human_steps: Vec<HumanStep>,
     /// The tool to call to confirm the install, usually `verify_setup`.
@@ -52,8 +56,8 @@ pub struct Resource {
 pub struct EnvVar {
     pub name: String,
     pub value: String,
-    /// The agent writes it to the env file but never echoes it to the user or
-    /// commits it.
+    /// `true`: the agent writes it to the env file but never echoes it to the
+    /// user or commits it. `false`: safe to commit, e.g. into deploy config.
     pub secret: bool,
 }
 
@@ -156,20 +160,22 @@ mod tests {
             },
             created: true,
             env: vec![EnvVar {
-                name: "THERMITE_DSN".into(),
+                name: "SENTRY_DSN".into(),
                 value: "https://k@example.com/1".into(),
-                secret: true,
+                secret: false,
             }],
             install: vec![Snippet {
                 target: "html".into(),
                 file_hint: None,
                 code: "<script></script>".into(),
             }],
+            compatible_with: vec![],
             human_steps: vec![],
             verify_with: "verify_setup".into(),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert!(v["install"][0].get("file_hint").is_none());
+        assert!(v.get("compatible_with").is_none());
         assert_eq!(serde_json::from_value::<Setup>(v).unwrap(), s);
     }
 

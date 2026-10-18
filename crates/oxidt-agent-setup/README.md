@@ -7,7 +7,7 @@ event arrives, so the user never has to open the dashboard.
 
 ```toml
 [dependencies]
-oxidt-agent-setup = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-agent-setup-v0.1.0" }
+oxidt-agent-setup = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-agent-setup-v0.2.0" }
 ```
 
 Types only (Serde + schemars): no axum, no rmcp, no database.
@@ -24,7 +24,12 @@ GSC, and accepting an invitation. Those go in `Setup.human_steps` as a URL, and
 the tool still succeeds instead of failing.
 
 Env vars marked `secret: true` get written to the env file. They are never shown
-to the user or committed.
+to the user or committed. `secret: false` values (a DSN, a public site key) are
+safe to commit, so they can go straight into deploy config.
+
+If the app speaks an existing SDK's protocol (Thermite takes Sentry events), list
+it in `Setup.compatible_with`. An agent that finds that SDK in the repo
+configures it instead of adding the snippet.
 
 ```rust
 #[tool(description = "Create or reuse a project and return its DSN and install snippet")]
