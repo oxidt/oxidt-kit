@@ -1,0 +1,12 @@
+[package]
+name = "oxidt-mcp-card"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SEP-2127 discovery documents for an MCP endpoint — the Server Card and the AI Catalog that points at it, plus the headers to serve them with"
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
