@@ -21,7 +21,7 @@ jobs:
       - name: Install Topcoat CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: topcoat-cli@0.10.0
+          tool: topcoat-cli@0.11.0
       - name: Check Topcoat formatting
         run: topcoat fmt --check --rustfmt crates/oxidt-auth/src/topcoat.rs crates/oxidt-auth/src/topcoat
       - run: cargo fmt --all --check
