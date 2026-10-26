@@ -17,9 +17,16 @@
 //!   duplicate. [`PutMode::Overwrite`] replaces in place: when the uid is
 //!   derived from what the entry *stands for* (a time slot, say), rewriting it
 //!   updates the entry rather than stacking a copy beside it.
+//! - [`query`] reads a collection back: a `REPORT` for its VTODOs, or its
+//!   VEVENTs in a time range, each with its href and ETag.
+//! - [`put_object`] writes to a resource the server already named — one found
+//!   by [`query`] — and returns the new ETag. [`PutMode::IfMatch`] makes the
+//!   write fail with [`Error::PreconditionFailed`] when someone else changed
+//!   the entry since it was read, instead of silently overwriting their edit.
+//! - [`delete`] removes a resource, optionally under the same `If-Match`.
 //! - [`validate_folder`] checks that a URL is a WebDAV collection, for apps
 //!   that also drop plain files next to the calendar.
-//! - [`ics`] builds VTODO and VEVENT bodies.
+//! - [`ics`] builds VTODO and VEVENT bodies and reads them back.
 //!
 //! ## Every request goes through oxidt-egress
 //!
@@ -34,7 +41,7 @@ mod dav;
 mod error;
 pub mod ics;
 
-pub use dav::{discover, put_ics, resource_url, validate_folder};
+pub use dav::{delete, discover, put_ics, put_object, query, resource_url, validate_folder};
 pub use error::Error;
 
 /// The egress crate this one is built on, so an app that also calls it
@@ -44,6 +51,7 @@ pub use error::Error;
 /// not recognise.
 pub use oxidt_egress;
 
+use chrono::{DateTime, Utc};
 use secrecy::SecretString;
 use url::Url;
 
@@ -65,6 +73,9 @@ pub struct Calendar {
     pub href: Url,
     /// The display name, or the last path segment when the server has none.
     pub name: String,
+    /// The calendar's colour as `#RRGGBB`, when the server reports one
+    /// (Apple's `calendar-color`, which Nextcloud and iCloud both set).
+    pub color: Option<String>,
     /// What the collection accepts. A server that doesn't report
     /// `supported-calendar-component-set` is taken to accept both.
     pub components: Vec<Component>,
@@ -79,16 +90,20 @@ pub enum Component {
     Todo,
 }
 
-/// How [`put_ics`] treats an existing resource of the same name.
+/// How a `PUT` treats an existing resource of the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PutMode {
+pub enum PutMode<'a> {
     /// Replace it in place.
     Overwrite,
     /// Leave it alone (`If-None-Match: *`).
     CreateOnly,
+    /// Replace it only if it still carries this ETag (`If-Match`), exactly as
+    /// the server sent it. A `412` is [`Error::PreconditionFailed`]: it changed
+    /// since it was read.
+    IfMatch(&'a str),
 }
 
-/// What [`put_ics`] did.
+/// What a `PUT` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PutOutcome {
     /// `201`: the resource is new.
@@ -97,4 +112,39 @@ pub enum PutOutcome {
     Updated,
     /// `412` under [`PutMode::CreateOnly`]: it was already there, untouched.
     AlreadyExists,
+}
+
+/// What [`put_object`] did, and the ETag the server gave the new version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    pub outcome: PutOutcome,
+    /// Verbatim, quotes included. Servers may omit it (when they rewrite the
+    /// body on store); [`query`] then reads it back.
+    pub etag: Option<String>,
+}
+
+/// What [`query`] asks a collection for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query {
+    /// Every VTODO, done or not.
+    Todos,
+    /// VEVENTs overlapping `[start, end)`. Recurring events whose series
+    /// overlaps are included once, as stored.
+    Events {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
+}
+
+/// One calendar object found by [`query`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    /// Where it lives. Not always `{uid}.ics`: other clients name their own
+    /// resources, so update and delete by this, never by a rebuilt name.
+    pub href: Url,
+    /// Verbatim, quotes included — hand it back to [`PutMode::IfMatch`] or
+    /// [`delete`] as is.
+    pub etag: Option<String>,
+    /// The iCalendar text; read it with [`ics::todos`] or [`ics::events`].
+    pub ics: String,
 }

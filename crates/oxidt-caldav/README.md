@@ -1,12 +1,13 @@
 # oxidt-caldav
 
-CalDAV/WebDAV for apps that write a user's own calendar: discovery, a
-create-only or overwrite `PUT`, a WebDAV folder check, and VTODO/VEVENT bodies.
+CalDAV/WebDAV for apps that sync a user's own calendar: discovery, `REPORT`
+queries, a create-only, overwrite or ETag-guarded `PUT`, `DELETE`, a WebDAV
+folder check, and VTODO/VEVENT bodies written and read.
 Every request goes through [`oxidt-egress`](../oxidt-egress).
 
 ```toml
 [dependencies]
-oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
+oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.2.0" }
 ```
 
 An app that also calls egress directly depends on `oxidt-caldav` only and
@@ -43,6 +44,19 @@ Then re-planning should replace the entry, not leave it alone.
 `PutMode::Overwrite` sends no precondition, so writing again updates the entry
 instead of adding a copy.
 
+**Two-way sync goes by href and ETag.** `query` returns each object's href
+and ETag exactly as the server sent them. Update and delete by that href:
+other clients name their own resources, so `{uid}.ics` is only right for
+entries this app created. Hand the ETag back as `PutMode::IfMatch` or to
+`delete`, and a `412` (`Error::PreconditionFailed`) means someone edited the
+entry since you read it — re-read instead of clobbering their change. ETags
+stay opaque, quotes and `W/` included; stripping them makes every `If-Match`
+fail.
+
+**Reading times.** `ics::todos` and `ics::events` turn `TZID` times into UTC
+through the IANA zone they name. A floating time, or a zone name the tz
+database doesn't know, is taken as UTC.
+
 **No redirects, public https only.** The account URL is user input. A `PUT`
 that followed a redirect would write to a URL the user never saw.
 
@@ -50,14 +64,22 @@ that followed a redirect would write to a URL the user never saw.
 
 ```rust
 pub struct Account { pub base: Url, pub username: String, pub password: SecretString }
-pub struct Calendar { pub href: Url, pub name: String, pub components: Vec<Component> }
+pub struct Calendar { pub href: Url, pub name: String, pub color: Option<String>,
+                      pub components: Vec<Component> }
 pub enum Component { Event, Todo }
-pub enum PutMode { Overwrite, CreateOnly }
+pub enum PutMode<'a> { Overwrite, CreateOnly, IfMatch(&'a str) }
 pub enum PutOutcome { Created, Updated, AlreadyExists }
+pub struct Stored { pub outcome: PutOutcome, pub etag: Option<String> }
+pub enum Query { Todos, Events { start: DateTime<Utc>, end: DateTime<Utc> } }
+pub struct Object { pub href: Url, pub etag: Option<String>, pub ics: String }
 
 pub async fn discover(account: &Account) -> Result<Vec<Calendar>, Error>;
+pub async fn query(account: &Account, collection: &Url, query: Query) -> Result<Vec<Object>, Error>;
 pub async fn put_ics(account: &Account, collection: &Url, uid: &str, body: &str, mode: PutMode)
     -> Result<PutOutcome, Error>;
+pub async fn put_object(account: &Account, url: &Url, body: &str, mode: PutMode)
+    -> Result<Stored, Error>;
+pub async fn delete(account: &Account, url: &Url, etag: Option<&str>) -> Result<(), Error>;
 pub fn resource_url(collection: &Url, uid: &str) -> Result<Url, Error>;
 pub async fn validate_folder(account: &Account, url: &str) -> Result<Url, Error>;
 
@@ -67,11 +89,16 @@ pub mod ics {
                 stamped: DateTime<Utc>) -> String;
     pub fn event(uid, summary, description, start: When, end: Option<When>,
                  location: Option<&str>, stamped: DateTime<Utc>) -> String;
+    // The same with every field, including completion and RRULE:
+    pub fn todo_body(body: &TodoBody) -> String;
+    pub fn event_body(body: &EventBody) -> String;
+    pub fn todos(ics: &str) -> Vec<ReadTodo>;
+    pub fn events(ics: &str) -> Vec<ReadEvent>;
 }
 ```
 
 `Error` keeps the status: `Unauthorized` (401), `NotFound` (404, or no calendar
-home), `PreconditionFailed` (412 under `Overwrite`), `NotACollection`,
+home), `PreconditionFailed` (412 under `Overwrite` or `IfMatch`, or on `delete`), `NotACollection`,
 `Status { code, title }` for everything else, plus `Transport`,
 `Egress(oxidt_egress::Error)`, `Xml` and `Url`. It has no user-facing copy.
 The app writes its own; a 403 or 409 on `PUT` usually means the URL is a
@@ -115,6 +142,22 @@ for hold in holds {
         Err(e) => failures.push(explain(&e)),
     }
 }
+```
+
+**Two-way sync.** Read, edit locally, write back without clobbering.
+
+```rust
+use oxidt_caldav::{PutMode, Query, delete, ics, put_object, query};
+
+for object in query(&account, &calendar.href, Query::Todos).await? {
+    for todo in ics::todos(&object.ics) {
+        store.upsert(&todo, &object.href, object.etag.as_deref());
+    }
+}
+// later, after a local edit:
+let stored = put_object(&account, &task.href, &body, PutMode::IfMatch(&task.etag)).await?;
+task.etag = stored.etag; // None: read it back on the next query
+delete(&account, &gone.href, Some(&gone.etag)).await?;
 ```
 
 ## Tests

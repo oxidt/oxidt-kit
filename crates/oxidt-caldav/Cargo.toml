@@ -1,15 +1,15 @@
 [package]
 name = "oxidt-caldav"
-version = "0.1.1"
+version = "0.2.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CalDAV/WebDAV for apps that write a user's own calendar — discovery, create-only or overwrite PUT, WebDAV folder check, VTODO/VEVENT bodies; every request through oxidt-egress"
+description = "CalDAV/WebDAV for apps that sync a user's own calendar — discovery, REPORT queries, ETag-guarded PUT and DELETE, WebDAV folder check, VTODO/VEVENT bodies and parsing; every request through oxidt-egress"
 
 [dependencies]
 chrono = { workspace = true }
-icalendar = { version = "0.17", default-features = false }
+icalendar = { version = "0.17.13", default-features = false, features = ["parser", "chrono-tz"] }
 oxidt-egress = { path = "../oxidt-egress", features = ["client", "tokio"] }
 reqwest = { version = "0.13.1", default-features = false, features = [
     "rustls",

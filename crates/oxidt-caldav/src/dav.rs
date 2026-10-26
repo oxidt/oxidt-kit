@@ -5,7 +5,7 @@ use reqwest::{Method, StatusCode};
 use secrecy::ExposeSecret;
 use url::Url;
 
-use crate::{Account, Calendar, Component, Error, PutMode, PutOutcome};
+use crate::{Account, Calendar, Component, Error, Object, PutMode, PutOutcome, Query, Stored};
 
 const TIMEOUTS: Timeouts = Timeouts {
     connect: Duration::from_secs(10),
@@ -13,13 +13,14 @@ const TIMEOUTS: Timeouts = Timeouts {
 };
 const DAV: &str = "DAV:";
 const CALDAV: &str = "urn:ietf:params:xml:ns:caldav";
+const APPLE: &str = "http://apple.com/ns/ical/";
 
 const PRINCIPAL: &str =
     r#"<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
 const HOME: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/></d:prop></d:propfind>"#;
 const RESOURCETYPE: &str =
     r#"<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#;
-const LIST: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:displayname/><d:resourcetype/><c:supported-calendar-component-set/></d:prop></d:propfind>"#;
+const LIST: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:displayname/><d:resourcetype/><c:supported-calendar-component-set/><a:calendar-color/></d:prop></d:propfind>"#;
 
 /// Find the account's calendars: principal → calendar home → its collections.
 pub async fn discover(account: &Account) -> Result<Vec<Calendar>, Error> {
@@ -71,6 +72,7 @@ pub async fn discover(account: &Account) -> Result<Vec<Calendar>, Error> {
             Ok(Calendar {
                 href,
                 name,
+                color: r.color.as_deref().and_then(hex_color),
                 components,
             })
         })
@@ -87,14 +89,49 @@ pub async fn put_ics(
     collection: &Url,
     uid: &str,
     body: &str,
-    mode: PutMode,
+    mode: PutMode<'_>,
 ) -> Result<PutOutcome, Error> {
     let url = check_url(
         resource_url(collection, uid)?.as_str(),
         &UrlPolicy::default(),
     )?;
     let client = client_for(&url).await?;
+    Ok(put_with(&client, account, url, body, mode).await?.outcome)
+}
+
+/// Write `body` to `url`, a resource the server already named (an
+/// [`Object::href`]), and return the new ETag.
+///
+/// A `412` is [`PutOutcome::AlreadyExists`] under [`PutMode::CreateOnly`] and
+/// [`Error::PreconditionFailed`] otherwise.
+pub async fn put_object(
+    account: &Account,
+    url: &Url,
+    body: &str,
+    mode: PutMode<'_>,
+) -> Result<Stored, Error> {
+    let url = check_url(url.as_str(), &UrlPolicy::default())?;
+    let client = client_for(&url).await?;
     put_with(&client, account, url, body, mode).await
+}
+
+/// Read a collection's VTODOs, or its VEVENTs in a time range.
+pub async fn query(
+    account: &Account,
+    collection: &Url,
+    query: Query,
+) -> Result<Vec<Object>, Error> {
+    let url = check_url(collection.as_str(), &UrlPolicy::default())?;
+    let client = client_for(&url).await?;
+    query_with(&client, account, url, query).await
+}
+
+/// Delete the resource at `url`. With an `etag`, only if it still carries it
+/// (`412` → [`Error::PreconditionFailed`]). Already gone (`404`) counts as done.
+pub async fn delete(account: &Account, url: &Url, etag: Option<&str>) -> Result<(), Error> {
+    let url = check_url(url.as_str(), &UrlPolicy::default())?;
+    let client = client_for(&url).await?;
+    delete_with(&client, account, url, etag).await
 }
 
 /// `{collection}/{uid}.ics`, tolerating a collection URL with or without its
@@ -136,18 +173,84 @@ async fn put_with(
     account: &Account,
     url: Url,
     body: &str,
-    mode: PutMode,
-) -> Result<PutOutcome, Error> {
+    mode: PutMode<'_>,
+) -> Result<Stored, Error> {
     let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
-    if mode == PutMode::CreateOnly {
-        headers.push(("If-None-Match", "*"));
+    match mode {
+        PutMode::Overwrite => {}
+        PutMode::CreateOnly => headers.push(("If-None-Match", "*")),
+        PutMode::IfMatch(etag) => headers.push(("If-Match", etag)),
     }
-    let (status, _) = send(client, account, Method::PUT, url, &headers, body.into()).await?;
-    match status.as_u16() {
-        201 => Ok(PutOutcome::Created),
-        200 | 204 => Ok(PutOutcome::Updated),
-        412 if mode == PutMode::CreateOnly => Ok(PutOutcome::AlreadyExists),
-        _ => Err(failure(status)),
+    let reply = send(client, account, Method::PUT, url, &headers, body.into()).await?;
+    let outcome = match reply.status.as_u16() {
+        201 => PutOutcome::Created,
+        200 | 204 => PutOutcome::Updated,
+        412 if mode == PutMode::CreateOnly => PutOutcome::AlreadyExists,
+        _ => return Err(failure(reply.status)),
+    };
+    Ok(Stored {
+        outcome,
+        etag: reply.etag,
+    })
+}
+
+async fn query_with(
+    client: &reqwest::Client,
+    account: &Account,
+    url: Url,
+    query: Query,
+) -> Result<Vec<Object>, Error> {
+    let method = Method::from_bytes(b"REPORT").expect("valid method");
+    let headers = [("Depth", "1"), ("Content-Type", "application/xml")];
+    let body = report_body(query);
+    let reply = send(client, account, method, url.clone(), &headers, body).await?;
+    multistatus(reply.status, &reply.body)?
+        .into_iter()
+        .filter_map(|r| Some((r.href, r.etag, r.data?)))
+        .map(|(href, etag, ics)| {
+            Ok(Object {
+                href: resolve(&url, &href)?,
+                etag,
+                ics,
+            })
+        })
+        .collect()
+}
+
+/// The `calendar-query` body for `query` (RFC 4791 §7.8).
+fn report_body(query: Query) -> String {
+    let filter = match query {
+        Query::Todos => r#"<c:comp-filter name="VTODO"/>"#.to_string(),
+        Query::Events { start, end } => format!(
+            r#"<c:comp-filter name="VEVENT"><c:time-range start="{}" end="{}"/></c:comp-filter>"#,
+            start.format("%Y%m%dT%H%M%SZ"),
+            end.format("%Y%m%dT%H%M%SZ"),
+        ),
+    };
+    format!(
+        r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR">{filter}</c:comp-filter></c:filter></c:calendar-query>"#
+    )
+}
+
+async fn delete_with(
+    client: &reqwest::Client,
+    account: &Account,
+    url: Url,
+    etag: Option<&str>,
+) -> Result<(), Error> {
+    let headers: Vec<_> = etag.map(|etag| ("If-Match", etag)).into_iter().collect();
+    let reply = send(
+        client,
+        account,
+        Method::DELETE,
+        url,
+        &headers,
+        String::new(),
+    )
+    .await?;
+    match reply.status.as_u16() {
+        200 | 204 | 404 => Ok(()),
+        _ => Err(failure(reply.status)),
     }
 }
 
@@ -160,10 +263,17 @@ async fn propfind(
     let client = client_for(url).await?;
     let method = Method::from_bytes(b"PROPFIND").expect("valid method");
     let headers = [("Depth", depth), ("Content-Type", "application/xml")];
-    send(&client, account, method, url.clone(), &headers, body.into()).await
+    let reply = send(&client, account, method, url.clone(), &headers, body.into()).await?;
+    Ok((reply.status, reply.body))
 }
 
-/// One request with basic auth; returns the status and body.
+struct Reply {
+    status: StatusCode,
+    etag: Option<String>,
+    body: String,
+}
+
+/// One request with basic auth.
 async fn send(
     client: &reqwest::Client,
     account: &Account,
@@ -171,7 +281,7 @@ async fn send(
     url: Url,
     headers: &[(&str, &str)],
     body: String,
-) -> Result<(StatusCode, String), Error> {
+) -> Result<Reply, Error> {
     let mut request = client
         .request(method.clone(), url.clone())
         .basic_auth(&account.username, Some(account.password.expose_secret()))
@@ -182,8 +292,13 @@ async fn send(
     let response = request.send().await.map_err(Error::Transport)?;
     let status = response.status();
     tracing::debug!(%method, host = url.host_str(), status = status.as_u16(), "caldav");
-    let text = response.text().await.map_err(Error::Transport)?;
-    Ok((status, text))
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = response.text().await.map_err(Error::Transport)?;
+    Ok(Reply { status, etag, body })
 }
 
 fn failure(status: StatusCode) -> Error {
@@ -212,11 +327,25 @@ fn resolve(base: &Url, href: &str) -> Result<Url, Error> {
     Ok(check_url(url.as_str(), &UrlPolicy::default())?)
 }
 
+/// `#RRGGBB` from a CalDAV colour, which servers send as `#RRGGBB` or with an
+/// alpha byte (`#RRGGBBAA`).
+fn hex_color(raw: &str) -> Option<String> {
+    let hex = raw.trim().strip_prefix('#')?;
+    let rgb = hex.get(..6).filter(|_| matches!(hex.len(), 6 | 8))?;
+    rgb.chars()
+        .all(|c| c.is_ascii_hexdigit())
+        .then(|| format!("#{rgb}"))
+}
+
 /// The properties of one `<d:response>` this crate cares about.
 #[derive(Debug, Default, PartialEq)]
 struct Resource {
     href: String,
     name: Option<String>,
+    color: Option<String>,
+    etag: Option<String>,
+    /// `calendar-data`, entity-decoded.
+    data: Option<String>,
     principal: Option<String>,
     home: Option<String>,
     calendar: bool,
@@ -234,6 +363,14 @@ fn href_below(node: roxmltree::Node) -> Option<String> {
         .find(|n| is(n, DAV, "href"))
         .and_then(|n| n.text())
         .map(|t| t.trim().to_string())
+}
+
+/// All text below `node`, CDATA included — `calendar-data` may come in pieces.
+fn text_of(node: roxmltree::Node) -> String {
+    node.descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect()
 }
 
 /// Parse a WebDAV multistatus, reading only properties from 200 propstats.
@@ -267,6 +404,12 @@ fn parse_multistatus(xml: &str) -> Option<Vec<Resource>> {
                 for prop in found {
                     if is(&prop, DAV, "displayname") {
                         r.name = prop.text().map(|t| t.trim().to_string());
+                    } else if is(&prop, APPLE, "calendar-color") {
+                        r.color = prop.text().map(|t| t.trim().to_string());
+                    } else if is(&prop, DAV, "getetag") {
+                        r.etag = prop.text().map(|t| t.trim().to_string());
+                    } else if is(&prop, CALDAV, "calendar-data") {
+                        r.data = Some(text_of(prop)).filter(|t| !t.trim().is_empty());
                     } else if is(&prop, DAV, "current-user-principal") {
                         r.principal = href_below(prop);
                     } else if is(&prop, CALDAV, "calendar-home-set") {
@@ -434,6 +577,16 @@ mod tests {
     /// `status` and hands back the request head it received. Reached through a
     /// plain client, since the egress guard refuses loopback by design.
     fn serve_once(status: &'static str) -> (Url, mpsc::Receiver<String>) {
+        serve_once_with(status, "", "")
+    }
+
+    /// [`serve_once`] with extra response header lines (each ending `\r\n`)
+    /// and a body.
+    fn serve_once_with(
+        status: &'static str,
+        headers: &'static str,
+        reply: &'static str,
+    ) -> (Url, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = Url::parse(&format!("http://{}/cal/", listener.local_addr().unwrap())).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -458,7 +611,8 @@ mod tests {
             let mut stream = stream;
             write!(
                 stream,
-                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
             )
             .unwrap();
             tx.send(head).unwrap();
@@ -479,7 +633,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(outcome, PutOutcome::AlreadyExists);
+        assert_eq!(outcome.outcome, PutOutcome::AlreadyExists);
 
         let head = request.recv().unwrap().to_ascii_lowercase();
         assert!(head.starts_with("put /cal/abc.ics "), "{head}");
@@ -507,5 +661,158 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("if-none-match")
         );
+    }
+
+    #[tokio::test]
+    async fn if_match_sends_the_etag_verbatim_and_returns_the_new_one() {
+        let (collection, request) = serve_once_with("204 No Content", "ETag: \"v2\"\r\n", "");
+        let url = resource_url(&collection, "abc").unwrap();
+        let stored = put_with(
+            &reqwest::Client::new(),
+            &account(),
+            url,
+            "",
+            PutMode::IfMatch("\"v1\""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.outcome, PutOutcome::Updated);
+        assert_eq!(stored.etag.as_deref(), Some("\"v2\""));
+        let head = request.recv().unwrap().to_ascii_lowercase();
+        assert!(head.contains("if-match: \"v1\""), "{head}");
+    }
+
+    #[tokio::test]
+    async fn if_match_reports_a_412_as_changed_since_read() {
+        let (collection, _) = serve_once("412 Precondition Failed");
+        let url = resource_url(&collection, "abc").unwrap();
+        let outcome = put_with(
+            &reqwest::Client::new(),
+            &account(),
+            url,
+            "",
+            PutMode::IfMatch("\"v1\""),
+        )
+        .await;
+        assert!(matches!(outcome, Err(Error::PreconditionFailed)));
+    }
+
+    #[tokio::test]
+    async fn delete_treats_already_gone_as_done_and_a_412_as_changed() {
+        let (collection, request) = serve_once("404 Not Found");
+        let url = resource_url(&collection, "abc").unwrap();
+        delete_with(&reqwest::Client::new(), &account(), url, Some("\"v1\""))
+            .await
+            .unwrap();
+        let head = request.recv().unwrap().to_ascii_lowercase();
+        assert!(head.starts_with("delete /cal/abc.ics "), "{head}");
+        assert!(head.contains("if-match: \"v1\""), "{head}");
+
+        let (collection, request) = serve_once("412 Precondition Failed");
+        let url = resource_url(&collection, "abc").unwrap();
+        let outcome = delete_with(&reqwest::Client::new(), &account(), url, None).await;
+        assert!(matches!(outcome, Err(Error::PreconditionFailed)));
+        assert!(
+            !request
+                .recv()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("if-match")
+        );
+    }
+
+    #[test]
+    fn a_report_yields_each_object_with_its_href_and_verbatim_etag() {
+        const BODY: &str = r#"<?xml version="1.0"?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+ <response>
+  <href>/cal/0b1.ics</href>
+  <propstat><prop><getetag>"e1"</getetag><C:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:0b1&#13;
+SUMMARY:Milk &amp; eggs&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</C:calendar-data></prop><status>HTTP/1.1 200 OK</status></propstat>
+ </response>
+ <response>
+  <href>/cal/from-another-client.ics</href>
+  <propstat><prop><getetag>W/"e2"</getetag><C:calendar-data><![CDATA[BEGIN:VCALENDAR
+BEGIN:VTODO
+UID:other
+SUMMARY:Call <Anna>
+END:VTODO
+END:VCALENDAR
+]]></C:calendar-data></prop><status>HTTP/1.1 200 OK</status></propstat>
+  <propstat><prop><displayname/></prop><status>HTTP/1.1 404 Not Found</status></propstat>
+ </response>
+</multistatus>"#;
+        let found: Vec<_> = parse_multistatus(BODY)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.data.is_some())
+            .collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].href, "/cal/0b1.ics");
+        assert_eq!(found[0].etag.as_deref(), Some("\"e1\""));
+        assert_eq!(found[1].href, "/cal/from-another-client.ics");
+        assert_eq!(found[1].etag.as_deref(), Some("W/\"e2\""));
+        let todos: Vec<_> = found
+            .iter()
+            .flat_map(|r| crate::ics::todos(r.data.as_deref().unwrap()))
+            .collect();
+        assert_eq!(todos[0].summary, "Milk & eggs");
+        assert_eq!(todos[1].summary, "Call <Anna>");
+    }
+
+    #[tokio::test]
+    async fn a_query_is_a_depth_1_report_and_its_hrefs_meet_the_egress_policy() {
+        const BODY: &str = r#"<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><response><href>/cal/a.ics</href><propstat><prop><getetag>"e"</getetag><C:calendar-data>BEGIN:VCALENDAR
+END:VCALENDAR
+</C:calendar-data></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>"#;
+        let (collection, request) = serve_once_with("207 Multi-Status", "", BODY);
+        let outcome = query_with(
+            &reqwest::Client::new(),
+            &account(),
+            collection,
+            Query::Todos,
+        )
+        .await;
+        // The test server is plain-http loopback, so the href it sends back is
+        // refused like any other the policy wouldn't allow.
+        assert!(matches!(
+            outcome,
+            Err(Error::Egress(oxidt_egress::Error::Scheme))
+        ));
+        let head = request.recv().unwrap().to_ascii_lowercase();
+        assert!(head.starts_with("report /cal/ "), "{head}");
+        assert!(head.contains("depth: 1"), "{head}");
+    }
+
+    #[test]
+    fn an_event_query_filters_on_the_time_range_in_utc() {
+        let body = report_body(Query::Events {
+            start: "2026-10-26T00:00:00Z".parse().unwrap(),
+            end: "2026-11-02T00:00:00+01:00".parse().unwrap(),
+        });
+        assert!(body.contains(r#"<c:comp-filter name="VEVENT">"#), "{body}");
+        assert!(
+            body.contains(r#"<c:time-range start="20261026T000000Z" end="20261101T230000Z"/>"#),
+            "{body}"
+        );
+        assert!(report_body(Query::Todos).contains(r#"<c:comp-filter name="VTODO"/>"#));
+    }
+
+    #[test]
+    fn calendar_colours_lose_their_alpha_byte() {
+        let found = parse_multistatus(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:x1="http://apple.com/ns/ical/"><d:response><d:href>/c/</d:href><d:propstat><d:prop><x1:calendar-color>#0082C9FF</x1:calendar-color></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+        )
+        .unwrap();
+        assert_eq!(found[0].color.as_deref(), Some("#0082C9FF"));
+        assert_eq!(hex_color("#0082C9FF").as_deref(), Some("#0082C9"));
+        assert_eq!(hex_color("#0082c9").as_deref(), Some("#0082c9"));
+        assert_eq!(hex_color("blue"), None);
+        assert_eq!(hex_color("#12345"), None);
     }
 }
