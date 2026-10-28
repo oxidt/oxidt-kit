@@ -1,0 +1,27 @@
+[package]
+name = "oxidt-jobs"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable, at-least-once Postgres job queue: SKIP LOCKED claims, fenced leases, priority, backoff and a worker pool over an app-supplied handler"
+
+[dependencies]
+# The one Postgres crate in the kit: the queue is the SQL.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "macros",
+] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["migrate"] }

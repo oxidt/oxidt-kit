@@ -24,13 +24,15 @@ are tagged `oxidt-*-v*`.
 | [`oxidt-egress`](crates/oxidt-egress) | outbound HTTP to user-supplied URLs without becoming a proxy into the private network — https-only URL policy, address checks, DNS pinning, manual redirects |
 | [`oxidt-caldav`](crates/oxidt-caldav) | CalDAV/WebDAV for apps that write a user's own calendar — discovery, create-only or overwrite PUT, WebDAV folder check, VTODO/VEVENT bodies; every request through `oxidt-egress` |
 | [`oxidt-mcp-oauth`](crates/oxidt-mcp-oauth) | the OAuth 2.1 authorization-server core for an MCP endpoint — discovery metadata, dynamic client registration, PKCE authorization code and the validation rules; storage, sessions and the consent page stay in the app |
+| [`oxidt-jobs`](crates/oxidt-jobs) | durable, at-least-once Postgres job queue — SKIP LOCKED claims, fenced leases, priority, backoff with retry-after, a worker pool over an app-supplied `Handler` |
 | [`oxidt-mcp-card`](crates/oxidt-mcp-card) | SEP-2127 discovery for an MCP endpoint — the Server Card at `<endpoint>/server-card`, the `/.well-known/ai-catalog.json` that embeds it, and the CORS/cache headers to serve both with |
 
 `oxidt-agent-setup` moved to crates.io as [`agent-setup`](https://agent-setup.oxidt.com);
 the old tags stay buildable.
 
-All are storage-agnostic: no database dependency, no ORM types in any public
-signature. `oxidt-auth` reaches storage through the `AuthUserStore`,
+All but one are storage-agnostic: no database dependency, no ORM types in any
+public signature. The exception is `oxidt-jobs`, whose queue *is* its Postgres
+SQL; it depends on `sqlx` and reads the `background_jobs` table in its `schema.sql`. `oxidt-auth` reaches storage through the `AuthUserStore`,
 `AuthEmailSender` and `AuthRateLimitStore` traits, which the host app
 implements. `oxidt-billing` is the provider-neutral core; `oxidt-stripe`,
 `oxidt-polar` and `oxidt-creem` are the provider clients and depend on neither
@@ -56,6 +58,7 @@ oxidt-egress = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-eg
 oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
 oxidt-mcp-oauth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-oauth-v0.1.0" }
 oxidt-mcp-card = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-card-v0.1.0" }
+oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.0" }
 ```
 
 `oxidt-egress` is for apps that need only egress. An app using both depends on
