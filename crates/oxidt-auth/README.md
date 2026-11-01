@@ -409,6 +409,12 @@ id_token — and the passkey paths decode CBOR from unauthenticated callers.
 **`/auth/dev-login` is compiled out of release builds** (`#[cfg(debug_assertions)]`)
 *and* additionally requires `DEV_LOGIN=true` at runtime.
 
+**`AUTH_FIXED_OTP` gives an App Store reviewer a fixed code.** Set
+`review@example.com:123456` (comma-separate several) and that address gets the
+listed six-digit code instead of a random one, never mailed; expiry and the
+attempt cap still apply. It is a standing password for that account, so keep
+the account to demo data and unset the variable when no review is pending.
+
 **A captcha guards new-user registration**, using bollwark: set `CAPTCHA_URL`,
 `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` and the login page mounts the widget
 in the email form, pre-solving while the user types; the token is verified

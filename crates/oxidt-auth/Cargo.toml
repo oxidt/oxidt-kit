@@ -103,7 +103,7 @@ name = "oxidt-auth"
 # change; every app should move to this pin.
 # 0.17.0 moves to topcoat 0.11. Breaking only in that apps must move to
 # topcoat 0.11 too; no API change.
-version = "0.17.0"
+version = "0.17.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

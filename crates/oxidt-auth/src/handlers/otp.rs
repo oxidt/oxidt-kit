@@ -146,6 +146,21 @@ pub(super) async fn verify_captcha_token(cfg: &CaptchaCfg, token: &str) -> AuthR
 
 // ── Mint, mail, verify ──────────────────────────────────────────────
 
+/// App Review cannot read our mail, so `AUTH_FIXED_OTP` (`email:code`, comma
+/// separated) gives listed addresses a fixed six-digit code that is never
+/// mailed. Expiry and the attempt cap still apply; unset, nothing changes.
+fn fixed_otp(email: &str) -> Option<String> {
+    parse_fixed_otp(&std::env::var("AUTH_FIXED_OTP").ok()?, email)
+}
+
+fn parse_fixed_otp(raw: &str, email: &str) -> Option<String> {
+    raw.split(',').find_map(|pair| {
+        let (address, code) = pair.trim().rsplit_once(':')?;
+        let valid = code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit());
+        (valid && address.trim().eq_ignore_ascii_case(email.trim())).then(|| code.to_owned())
+    })
+}
+
 pub(super) async fn generate_and_send_otp(
     auth_state: &AuthState,
     session: &tower_sessions::Session,
@@ -162,8 +177,12 @@ pub(super) async fn generate_and_send_otp(
         ));
     };
 
-    let code = crypto::generate_numeric_otp(6)
-        .map_err(|e| AuthError::ServerStateError(format!("Failed to generate OTP: {}", e)))?;
+    let fixed = fixed_otp(email);
+    let code = match &fixed {
+        Some(code) => code.clone(),
+        None => crypto::generate_numeric_otp(6)
+            .map_err(|e| AuthError::ServerStateError(format!("Failed to generate OTP: {}", e)))?,
+    };
 
     let expires_at = chrono::Utc::now().timestamp() + 600;
     session.insert(CUSTOM_OTP_CODE_KEY, &code).await?;
@@ -178,12 +197,16 @@ pub(super) async fn generate_and_send_otp(
         .get::<crate::locale::Locale>("locale")
         .await?
         .unwrap_or_default();
-    email_sender
-        .send_verification_code_localized(email, &code, 10, locale)
-        .await
-        .map_err(|e| {
-            AuthError::ServerStateError(format!("Failed to send verification email: {}", e))
-        })?;
+    if fixed.is_some() {
+        warn!(to = %email, "fixed OTP issued (AUTH_FIXED_OTP), not mailed");
+    } else {
+        email_sender
+            .send_verification_code_localized(email, &code, 10, locale)
+            .await
+            .map_err(|e| {
+                AuthError::ServerStateError(format!("Failed to send verification email: {}", e))
+            })?;
+    }
 
     session
         .insert(CUSTOM_OTP_LAST_SENT_AT_KEY, chrono::Utc::now().timestamp())
@@ -281,6 +304,27 @@ pub(super) async fn verify_otp_guarded(
     let outcome = verify_otp_from_session(session, submitted_code).await;
     persist_now(session).await?;
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod fixed_otp_tests {
+    use super::parse_fixed_otp;
+
+    #[test]
+    fn matches_only_listed_addresses_with_six_digit_codes() {
+        let raw = "review@example.com:123456, other@example.com:12ab56";
+        assert_eq!(
+            parse_fixed_otp(raw, "Review@Example.com").as_deref(),
+            Some("123456")
+        );
+        assert_eq!(parse_fixed_otp(raw, "other@example.com"), None);
+        assert_eq!(parse_fixed_otp(raw, "someone@example.com"), None);
+        assert_eq!(
+            parse_fixed_otp("review@example.com:12345", "review@example.com"),
+            None
+        );
+        assert_eq!(parse_fixed_otp("", "review@example.com"), None);
+    }
 }
 
 #[cfg(test)]
