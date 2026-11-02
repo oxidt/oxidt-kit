@@ -9,7 +9,7 @@ code. FerrisKey is the identity provider; the login screen is yours.
 
 ```toml
 [dependencies]
-oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.17.2", features = ["server"] }
+oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.17.3", features = ["server"] }
 ```
 
 No default features. Enable `server` (Axum handlers, FerrisKey client, session
@@ -174,7 +174,7 @@ Party, and — opt-in — a password step. It implies `passkey-rp`, so the app s
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
 ```toml
-auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.17.2", optional = true }
+auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.17.3", optional = true }
 
 [features]
 server = ["auth/server", "auth/local-login", ...]
@@ -201,7 +201,7 @@ let app = my_router.merge(local_auth_router(config, state));
 
 Mount `local_auth_router` *instead of* `auth_router` — both own
 `/auth/session/*`. On the UI side render `LocalLoginPage { redirect_url,
-app_name, logo_src, captcha_config }`; it adds passkey autofill (conditional
+app_name, logo_src, captcha_config, on_success, on_signup }`; it adds passkey autofill (conditional
 UI), an explicit "Sign in with a passkey" button, and a one-time enrollment
 offer after an OTP login.
 

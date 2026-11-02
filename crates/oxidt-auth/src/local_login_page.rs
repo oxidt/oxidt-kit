@@ -27,6 +27,10 @@ use dioxus::prelude::*;
 pub fn LocalLoginPage(
     redirect_url: String,
     #[props(default)] on_success: EventHandler<String>,
+    /// Fired just before `on_success` when the flow registered a new account
+    /// (a verified code for an address that had none), for signup analytics.
+    #[props(default)]
+    on_signup: EventHandler<()>,
     /// Bollwark captcha widget: `(server_url, site_key)`. When set, new-user
     /// registration is gated by the widget pre-solving invisibly inside the
     /// email form. Pass the same values the server reads from `CAPTCHA_URL` /
@@ -91,6 +95,9 @@ pub fn LocalLoginPage(
     // resource chain (trigger → server fetch → auth state update → effect).
     use_effect(move || {
         if let LoginStep::Success { redirect_url } = step() {
+            if *is_new_user.peek() {
+                on_signup.call(());
+            }
             on_success.call(redirect_url);
         }
     });
