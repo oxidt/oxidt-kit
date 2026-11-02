@@ -58,6 +58,63 @@ const PASSKEY_LOGIN_ENABLED: bool = true;
 const PASSKEY_CHALLENGE_KEY: &str = "passkey.challenge";
 const PASSKEY_USER_ID_KEY: &str = "passkey.user_id";
 
+// ── Per-account password lockout ────────────────────────────────────
+
+/// Failed local-password attempts one account may take per window, whatever
+/// session or IP they come from. The per-session cap alone resets with the
+/// cookie, which leaves only the per-IP limiter between a botnet and one
+/// account's password.
+const MAX_ACCOUNT_PASSWORD_FAILURES: u32 = 10;
+const ACCOUNT_LOCKOUT_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Bound on tracked accounts. Entries only exist for addresses with recent
+/// failures; past this, expired ones are swept and, if it is still full, new
+/// addresses go untracked (fail open) rather than evicting a locked one.
+const MAX_TRACKED_ACCOUNTS: usize = 100_000;
+
+/// `pw:<email>` → (failures, window start). In-process, not
+/// [`crate::AuthRateLimitStore`]: that store only offers check-and-increment
+/// against a host-defined request quota, with no way to read the count before
+/// the attempt or clear it on success. N replicas therefore allow N× the cap.
+static PASSWORD_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u32, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Count an attempt against `key` before it is made, so parallel requests
+/// each take a slot. `false` when the account is locked out.
+fn reserve_password_attempt(key: &str) -> bool {
+    let mut failures = PASSWORD_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if failures.len() >= MAX_TRACKED_ACCOUNTS {
+        failures.retain(|_, (_, since)| since.elapsed() < ACCOUNT_LOCKOUT_WINDOW);
+    }
+    if failures.len() >= MAX_TRACKED_ACCOUNTS && !failures.contains_key(key) {
+        return true;
+    }
+    let (count, since) = failures
+        .entry(key.to_string())
+        .or_insert((0, std::time::Instant::now()));
+    if since.elapsed() >= ACCOUNT_LOCKOUT_WINDOW {
+        *count = 0;
+        *since = std::time::Instant::now();
+    }
+    if *count >= MAX_ACCOUNT_PASSWORD_FAILURES {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+/// A correct password ends the run of failures, including the slot this
+/// attempt reserved.
+fn clear_password_failures(key: &str) {
+    PASSWORD_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+}
+
 // ── Request / Response types ────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -757,6 +814,16 @@ pub async fn verify_password_handler(
         persist_now(&session).await?;
     }
 
+    // The same cap per account, so a fresh cookie does not buy fresh guesses.
+    let account_key = format!("pw:{email}");
+    if !reserve_password_attempt(&account_key) {
+        warn!("Password attempts for '{email}' locked out");
+        return Err(AuthError::Unauthorized(
+            "Too many failed password attempts for this account. Please try again later."
+                .to_string(),
+        ));
+    }
+
     if !auth_state
         .user_store
         .verify_password(&email, &password)
@@ -767,6 +834,7 @@ pub async fn verify_password_handler(
     }
 
     session.remove::<u32>(PASSWORD_ATTEMPTS_KEY).await?;
+    clear_password_failures(&account_key);
 
     // A password the store accepts is the operator's own say-so, so it admits
     // the address whatever the registration policy says — and provisions the
@@ -1023,9 +1091,9 @@ async fn finalize_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        StartSessionRequest, StartSessionResponse, VerifyPasswordRequest,
-        passkey_conditional_options, passkey_fallback_to_otp, resolve_or_create_account,
-        start_session, verify_password_handler,
+        MAX_ACCOUNT_PASSWORD_FAILURES, StartSessionRequest, StartSessionResponse,
+        VerifyPasswordRequest, passkey_conditional_options, passkey_fallback_to_otp,
+        resolve_or_create_account, start_session, verify_password_handler,
     };
     use axum::{Extension, Json};
     use tower_sessions::{MemoryStore, Session};
@@ -1291,6 +1359,81 @@ mod tests {
             other => panic!("expected 401, got {:?}", other.map(|r| r.0.success)),
         }
         assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    /// One password attempt for `email`, each from a fresh session — a client
+    /// that drops its cookie between tries.
+    async fn try_password(
+        store: &Arc<OneUserStore>,
+        email: &str,
+        password: &str,
+    ) -> AuthResult<bool> {
+        verify_password_handler(
+            Extension(state_without_email(store.clone())),
+            Extension(closed_registration()),
+            session(),
+            Json(VerifyPasswordRequest {
+                email: email.to_string(),
+                password: password.to_string(),
+            }),
+        )
+        .await
+        .map(|resp| resp.0.success)
+    }
+
+    fn is_locked_out(result: &AuthResult<bool>) -> bool {
+        matches!(result, Err(AuthError::Unauthorized(msg)) if msg.contains("for this account"))
+    }
+
+    #[tokio::test]
+    async fn failures_lock_the_account_across_sessions() {
+        // Addresses unique to this test: the lockout is process-wide.
+        let store = Arc::new(OneUserStore {
+            password: Some(("locked@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+        for _ in 0..MAX_ACCOUNT_PASSWORD_FAILURES {
+            let result = try_password(&store, "locked@example.com", "wrong").await;
+            assert!(!is_locked_out(&result) && result.is_err());
+        }
+
+        // A fresh session does not reset it — not even for the right password.
+        let result = try_password(&store, "Locked@example.com", "hunter2").await;
+        assert!(
+            is_locked_out(&result),
+            "fresh session must still be refused"
+        );
+
+        // Another account is unaffected.
+        let result = try_password(&store, "bystander@example.com", "wrong").await;
+        assert!(!is_locked_out(&result) && result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_successful_password_does_not_lock_and_clears_failures() {
+        let store = Arc::new(OneUserStore {
+            password: Some(("cleared@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+        for _ in 0..MAX_ACCOUNT_PASSWORD_FAILURES - 1 {
+            assert!(
+                try_password(&store, "cleared@example.com", "wrong")
+                    .await
+                    .is_err()
+            );
+        }
+        for _ in 0..MAX_ACCOUNT_PASSWORD_FAILURES + 1 {
+            assert!(
+                try_password(&store, "cleared@example.com", "hunter2")
+                    .await
+                    .unwrap()
+            );
+        }
+        // The earlier failures were cleared, so a full run is available again.
+        for _ in 0..MAX_ACCOUNT_PASSWORD_FAILURES {
+            let result = try_password(&store, "cleared@example.com", "wrong").await;
+            assert!(!is_locked_out(&result) && result.is_err());
+        }
     }
 
     #[tokio::test]

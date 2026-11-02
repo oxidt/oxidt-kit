@@ -78,5 +78,6 @@
   "Email me a code instead": "Stattdessen einen Code per E-Mail senden",
   "Please enter your password.": "Bitte gib dein Passwort ein.",
   "Wrong email or password.": "E-Mail-Adresse oder Passwort falsch.",
-  "Too many failed password attempts. Please start a new login.": "Zu viele fehlgeschlagene Passwortversuche. Bitte starte eine neue Anmeldung."
+  "Too many failed password attempts. Please start a new login.": "Zu viele fehlgeschlagene Passwortversuche. Bitte starte eine neue Anmeldung.",
+  "Too many failed password attempts for this account. Please try again later.": "Zu viele fehlgeschlagene Passwortversuche für dieses Konto. Bitte versuche es später erneut."
 }

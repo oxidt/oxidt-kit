@@ -83,7 +83,7 @@ pub async fn sso_callback(
     let code_verifier = flow.code_verifier.ok_or_else(|| {
         AuthError::ServerStateError("Login flow missing PKCE verifier — please retry".to_string())
     })?;
-    let page = render_callback_page(&CallbackConfig {
+    callback_response(&CallbackConfig {
         token_url: ferriskey::token_url(&auth_config.ferriskey_url, &auth_config.ferriskey_realm),
         client_id: auth_config.ferriskey_client_id.clone(),
         redirect_uri: ferriskey::redirect_uri(&auth_config.base_url),
@@ -91,9 +91,37 @@ pub async fn sso_callback(
         code_verifier,
         complete_url: COMPLETE_PATH.to_string(),
         restart_url: START_PATH.to_string(),
-    });
+    })
+}
+
+/// The callback page with a CSP that runs only its own nonce'd script and
+/// style, and lets it talk only to FerrisKey's token endpoint and back to us.
+fn callback_response(cfg: &CallbackConfig) -> AuthResult<Response> {
+    let token_origin = url::Url::parse(&cfg.token_url)
+        .map_err(|e| {
+            AuthError::ServerStateError(format!(
+                "Invalid FerrisKey token URL {:?}: {e}",
+                cfg.token_url
+            ))
+        })?
+        .origin()
+        .ascii_serialization();
+    let nonce = crypto::generate_url_safe_token(16).expect("secure random generation failed");
+    let csp = format!(
+        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; \
+         connect-src 'self' {token_origin}; base-uri 'none'; form-action 'none'; \
+         frame-ancestors 'none'"
+    );
+    let page = render_callback_page(cfg, &nonce);
     // The page carries a one-time code and the PKCE verifier.
-    Ok(([(header::CACHE_CONTROL, "no-store")], Html(page)).into_response())
+    Ok((
+        [
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (header::CONTENT_SECURITY_POLICY, csp),
+        ],
+        Html(page),
+    )
+        .into_response())
 }
 
 fn validate_callback(flow: &FerrisKeyFlow, query: &SsoCallbackQuery) -> AuthResult<String> {
@@ -126,11 +154,13 @@ struct CallbackConfig {
 
 /// The values reach the script as JSON in a `<script type="application/json">`
 /// block, with `<` escaped so no value can close the block early.
-fn render_callback_page(cfg: &CallbackConfig) -> String {
+fn render_callback_page(cfg: &CallbackConfig, nonce: &str) -> String {
     let config = serde_json::to_string(cfg)
         .expect("CallbackConfig is plain strings")
         .replace('<', "\\u003c");
-    include_str!("sso_callback.html").replacen("__SSO_CONFIG__", &config, 1)
+    include_str!("sso_callback.html")
+        .replace("__CSP_NONCE__", nonce)
+        .replacen("__SSO_CONFIG__", &config, 1)
 }
 
 #[derive(Deserialize)]
@@ -227,21 +257,59 @@ mod tests {
         );
     }
 
-    #[test]
-    fn callback_page_cannot_be_broken_out_of_by_the_code() {
-        let page = render_callback_page(&CallbackConfig {
+    fn callback_config(code: &str) -> CallbackConfig {
+        CallbackConfig {
             token_url: "https://idp.example/realms/r/protocol/openid-connect/token".to_string(),
             client_id: "app".to_string(),
             redirect_uri: "https://app.example/auth/callback".to_string(),
-            code: "x</script><script>alert(1)</script>".to_string(),
+            code: code.to_string(),
             code_verifier: "v".to_string(),
             complete_url: "/auth/sso/complete".to_string(),
             restart_url: "/auth/sso/start".to_string(),
-        });
+        }
+    }
+
+    #[test]
+    fn callback_page_cannot_be_broken_out_of_by_the_code() {
+        let page =
+            render_callback_page(&callback_config("x</script><script>alert(1)</script>"), "n");
         assert!(page.contains(r#"id="sso-config">{"#));
         assert!(page.contains("\\u003c/script>\\u003cscript>alert(1)"));
         assert!(!page.contains("</script><script>"));
         assert!(!page.contains("__SSO_CONFIG__"));
+    }
+
+    #[tokio::test]
+    async fn callback_page_runs_only_under_its_per_response_nonce() {
+        let resp = callback_response(&callback_config("c0de")).unwrap();
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let nonce = csp
+            .split("script-src 'nonce-")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .unwrap()
+            .to_string();
+        assert!(nonce.len() >= 16);
+        assert!(csp.starts_with("default-src 'none';"));
+        assert!(csp.contains("connect-src 'self' https://idp.example;"));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page = String::from_utf8(body.to_vec()).unwrap();
+        assert!(page.contains(&format!("<script nonce=\"{nonce}\">")));
+        assert!(page.contains(&format!("<style nonce=\"{nonce}\">")));
+        assert!(!page.contains("__CSP_NONCE__"));
+
+        let again = callback_response(&callback_config("c0de")).unwrap();
+        assert!(
+            !again.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains(&nonce)
+        );
     }
 
     #[test]

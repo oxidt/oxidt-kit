@@ -146,6 +146,10 @@ pub async fn start_auth_flow(
 /// Submit username + password to the realm's `login-actions/authenticate`
 /// endpoint within an existing flow. Returns the response status enum so the
 /// caller can branch on Success / RequiresOtpChallenge / etc.
+///
+/// The `client_id` query param is read by FerrisKey <=0.9; from 0.10 the
+/// client comes from the auth session and the param is ignored. Drop it once
+/// every deployment runs 0.10+.
 pub async fn authenticate_password(
     base: &str,
     realm: &str,
@@ -294,11 +298,12 @@ pub async fn service_account_token(
 
 // ── User-management API (Bearer = service-account access_token) ─────
 
-/// List users in the realm, then filter client-side by email.
+/// Look up a realm user by exact (case-insensitive) email.
 ///
-/// FerrisKey's current REST surface has no email filter parameter. For the
-/// dashboard's expected user count this is fine; if it becomes hot we can
-/// add a cache or push for a server-side filter.
+/// FerrisKey >=0.10 paginates `/users` (20 per page by default) and filters
+/// `email` as a case-insensitive *contains* match, so we ask for that filter
+/// with the maximum page size and keep the exact match client-side. Older
+/// versions ignore both params and return every user.
 pub async fn find_user_by_email(
     base: &str,
     realm: &str,
@@ -306,7 +311,12 @@ pub async fn find_user_by_email(
     email: &str,
 ) -> AuthResult<Option<FerrisKeyUser>> {
     let url = realm_url(base, realm, "/users");
-    let resp = http().get(&url).bearer_auth(service_token).send().await?;
+    let resp = http()
+        .get(&url)
+        .query(&[("email", email), ("limit", "100")])
+        .bearer_auth(service_token)
+        .send()
+        .await?;
     let users: UsersResponse = json_or_error(resp, "find_user_by_email").await?;
 
     let needle = email.to_lowercase();
@@ -709,6 +719,13 @@ mod tests {
     /// Serve one canned response on a localhost socket and hand back the
     /// request head it received.
     fn one_shot_server(status: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        one_shot_server_with(status, r#"{"count":1}"#)
+    }
+
+    fn one_shot_server_with(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -720,7 +737,6 @@ mod tests {
             while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
                 head.push(byte[0]);
             }
-            let body = r#"{"count":1}"#;
             write!(
                 stream,
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -765,6 +781,31 @@ mod tests {
             err,
             AuthError::FerrisKeyError { status, .. } if status == StatusCode::FORBIDDEN
         ));
+    }
+
+    #[tokio::test]
+    async fn find_user_by_email_filters_server_side_and_matches_exactly() {
+        let user = |id: &str, email: &str| {
+            format!(r#"{{"id":"{id}","username":"{id}","email":"{email}","email_verified":true}}"#)
+        };
+        let body = format!(
+            r#"{{"data":[{},{}],"metadata":{{"page":1}}}}"#,
+            user("u-1", "xann@example.com"),
+            user("u-2", "Ann@Example.com"),
+        );
+        let (base, rx) = one_shot_server_with("200 OK", body.leak());
+        let found = find_user_by_email(&base, "oxidt", "svc-token", "ann@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "u-2");
+        let head = rx.recv().unwrap().to_lowercase();
+        assert!(
+            head.starts_with(
+                "get /realms/oxidt/users?email=ann%40example.com&limit=100 http/1.1\r\n"
+            )
+        );
+        assert!(head.contains("authorization: bearer svc-token\r\n"));
     }
 
     #[test]

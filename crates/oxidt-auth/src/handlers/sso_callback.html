@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Signing you in…</title>
-<style>
+<style nonce="__CSP_NONCE__">
   body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
 </style>
 </head>
 <body>
 <p id="msg">Signing you in…</p>
 <script type="application/json" id="sso-config">__SSO_CONFIG__</script>
-<script>
+<script nonce="__CSP_NONCE__">
 (function () {
   var c = JSON.parse(document.getElementById('sso-config').textContent);
   var msg = document.getElementById('msg');

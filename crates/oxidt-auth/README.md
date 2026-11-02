@@ -388,7 +388,9 @@ the counter written back before the lock is released. Without that, parallel
 requests carrying one cookie each read the same count and the cap is met once
 per burst, not per request. The lock is in-process, so N replicas serving the
 same cookie at once can overshoot by at most N passes — a bound set by your
-deployment, not by the attacker.
+deployment, not by the attacker. The local password step is also capped per
+account (10 failures per 15 minutes, in-process, so N replicas allow N×),
+so a client discarding its cookie gets no fresh guesses.
 
 **An id_token's email may only claim an existing account when the IdP marks it
 `email_verified`.** An unverified match is refused with 401 rather than migrated
