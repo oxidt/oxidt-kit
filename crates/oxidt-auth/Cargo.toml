@@ -103,7 +103,11 @@ name = "oxidt-auth"
 # change; every app should move to this pin.
 # 0.17.0 moves to topcoat 0.11. Breaking only in that apps must move to
 # topcoat 0.11 too; no API change.
-version = "0.17.1"
+# 0.17.2 adds `embed` to `topcoat::local_login_page` (as on the FerrisKey
+# page), follows FerrisKey 0.10's paginated `/users` in `find_user_by_email`,
+# locks the local password step per account and sends a CSP with the SSO
+# callback page. Additive.
+version = "0.17.2"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

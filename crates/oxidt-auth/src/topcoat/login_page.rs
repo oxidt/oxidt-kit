@@ -8,7 +8,7 @@ use ::topcoat::{
     Result,
     context::Cx,
     router::request,
-    view::{View, component, view},
+    view::{View, class, component, view},
 };
 
 use super::parts::{CHECK_CIRCLE, Trusted, X_CIRCLE, catalog, icon, spinner};
@@ -20,13 +20,16 @@ const SCRIPT: &str = include_str!("local_login.js");
 /// OTP with auto-passkey detection, passkey autofill, an optional password
 /// step, terms acceptance, and a one-time passkey enrollment offer.
 ///
-/// Render it inside a full HTML document. The locale is negotiated from the
-/// request (`oxidt_locale` cookie, then `Accept-Language`). `captcha` is the
-/// bollwark `(server_url, site_key)`, as in the Dioxus page.
+/// Render it inside a full HTML document. `embed` leaves out the full-page
+/// wrapper, card and heading, for a host that frames the form itself. The
+/// locale is negotiated from the request (`oxidt_locale` cookie, then
+/// `Accept-Language`). `captcha` is the bollwark `(server_url, site_key)`, as
+/// in the Dioxus page.
 #[component]
 pub async fn local_login_page(
     cx: &Cx,
     redirect_url: &str,
+    #[default] embed: bool,
     #[default] captcha: Option<(String, String)>,
     #[default] app_name: Option<String>,
     #[default] logo_src: Option<String>,
@@ -42,25 +45,33 @@ pub async fn local_login_page(
     Ok(view! {
         <div
             id="oxidt-login"
-            class="auth-bg min-h-screen flex flex-col items-center justify-center bg-base-200 p-4"
+            class=(class!(
+                "auth-bg min-h-screen flex flex-col items-center justify-center bg-base-200 p-4" if !embed,
+            ))
             data-redirect=(redirect_url)
             data-captcha=(if captcha.is_some() { "1" } else { "0" })
         >
-            <div class="auth-card card w-full max-w-md bg-base-100 animate-scale-in">
-                <div class="card-body p-7 sm:p-9">
-                    <div class="text-center mb-7">
-                        if let Some(src) = &logo_src {
-                            <img
-                                src=(src)
-                                alt=(app_name.as_deref().unwrap_or_default())
-                                class="h-16 mx-auto mb-4"
-                            >
-                        }
-                        <h1 class="text-2xl font-bold tracking-tight">(heading)</h1>
-                        <p class="text-sm text-base-content/60 mt-1.5">
-                            (t("Sign in or create an account"))
-                        </p>
-                    </div>
+            <div
+                class=(class!(
+                    "auth-card card w-full max-w-md bg-base-100 animate-scale-in" if !embed,
+                ))
+            >
+                <div class=(class!("card-body p-7 sm:p-9" if !embed))>
+                    if !embed {
+                        <div class="text-center mb-7">
+                            if let Some(src) = &logo_src {
+                                <img
+                                    src=(src)
+                                    alt=(app_name.as_deref().unwrap_or_default())
+                                    class="h-16 mx-auto mb-4"
+                                >
+                            }
+                            <h1 class="text-2xl font-bold tracking-tight">(heading)</h1>
+                            <p class="text-sm text-base-content/60 mt-1.5">
+                                (t("Sign in or create an account"))
+                            </p>
+                        </div>
+                    }
 
                     // Enabled by the script, so a submit before it ran can't
                     // fall through to a native GET. `contents` keeps it out of
