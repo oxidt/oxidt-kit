@@ -1,0 +1,45 @@
+[package]
+name = "oxidt-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded, permission-aware MCP capabilities for Rust and Topcoat applications"
+
+[features]
+default = []
+topcoat = ["dep:topcoat"]
+durable = ["dep:oxidt-jobs", "dep:sqlx", "dep:chrono", "dep:uuid"]
+
+[dependencies]
+oxidt-agent-core = { path = "../oxidt-agent-core", version = "0.1" }
+axum = "0.8"
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
+schemars = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+topcoat = { version = "=0.11.0", default-features = false, features = ["tower", "view"], optional = true }
+oxidt-jobs = { path = "../oxidt-jobs", version = "0.1", optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"], optional = true }
+chrono = { workspace = true, optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+
+[dev-dependencies]
+base64.workspace = true
+sha2 = "0.10"
+# Only `#[sqlx::test]` needs migrate; dev-dependencies cannot be optional.
+sqlx = { version = "0.8", default-features = false, features = ["migrate"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+
+[[example]]
+name = "topcoat"
+required-features = ["topcoat"]
+
+[[example]]
+name = "durable-topcoat"
+required-features = ["topcoat", "durable"]

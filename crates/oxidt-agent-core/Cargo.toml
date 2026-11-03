@@ -1,0 +1,11 @@
+[package]
+name = "oxidt-agent-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Framework-independent capability and permission model for embedded agent access"
+
+[dependencies]
+thiserror.workspace = true

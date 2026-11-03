@@ -10,6 +10,8 @@ are tagged `oxidt-*-v*`.
 
 | crate | what it is |
 |---|---|
+| [`oxidt-agent`](crates/oxidt-agent) | embedded MCP: typed capabilities, authentication, permissions, Topcoat examples, and optional durable approvals/actions over `oxidt-jobs` |
+| [`oxidt-agent-core`](crates/oxidt-agent-core) | framework-independent capability, principal and approval-policy model |
 | [`oxidt-markdown-editor`](crates/oxidt-markdown-editor) | live Markdown writing field with optional Topcoat and Dioxus components |
 | [`oxidt-crypto`](crates/oxidt-crypto) | secure random, Argon2 hashing, SHA-256 lookup hashes, API-key / CSRF / invitation tokens, PKCE `S256`, AES-256-GCM at rest |
 | [`oxidt-smtp`](crates/oxidt-smtp) | Lettre-backed SMTP — pooled sync/async clients with retry and timeouts, plus a one-shot per-tenant sender |
@@ -30,9 +32,10 @@ are tagged `oxidt-*-v*`.
 `oxidt-agent-setup` moved to crates.io as [`agent-setup`](https://agent-setup.oxidt.com);
 the old tags stay buildable.
 
-All but one are storage-agnostic: no database dependency, no ORM types in any
-public signature. The exception is `oxidt-jobs`, whose queue *is* its Postgres
-SQL; it depends on `sqlx` and reads the `background_jobs` table in its `schema.sql`. `oxidt-auth` reaches storage through the `AuthUserStore`,
+Most are storage-agnostic: no database dependency or ORM types in their public
+signatures. `oxidt-jobs` owns its Postgres queue SQL; it depends on `sqlx` and
+reads the `background_jobs` table in its `schema.sql`. `oxidt-agent` optionally
+uses Postgres for durable approvals and transactional actions. `oxidt-auth` reaches storage through the `AuthUserStore`,
 `AuthEmailSender` and `AuthRateLimitStore` traits, which the host app
 implements. `oxidt-billing` is the provider-neutral core; `oxidt-stripe`,
 `oxidt-polar` and `oxidt-creem` are the provider clients and depend on neither

@@ -40,6 +40,9 @@ pub struct Job {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
     pub payload: serde_json::Value,
+    /// Counted at claim, so this attempt is the last when `attempts >= max_attempts`.
+    pub attempts: i32,
+    pub max_attempts: i32,
     lease_token: Uuid,
 }
 
@@ -73,7 +76,7 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Job>, sqlx::Error> {
         UPDATE background_jobs j SET status='running', attempts=attempts+1,
             lease_until=NOW()+make_interval(secs => $2), lease_token=$1
         FROM candidate WHERE j.id=candidate.id
-        RETURNING j.id, j.owner_id, j.payload, j.lease_token
+        RETURNING j.id, j.owner_id, j.payload, j.attempts, j.max_attempts, j.lease_token
     "#,
     )
     .bind(Uuid::new_v4())
