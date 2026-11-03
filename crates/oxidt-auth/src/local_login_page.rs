@@ -800,7 +800,7 @@ pub fn LocalLoginPage(
                         div { class: "mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary",
                             {icon_fingerprint("h-8 w-8")}
                         }
-                        p { class: "font-medium", {crate::locale::tr("Skip the email code next time")} }
+                        p { class: "font-medium", {crate::locale::tr("Sign in faster next time")} }
                         p { class: "text-sm text-base-content/50",
                             {crate::locale::tr("Add a passkey to sign in with your fingerprint, face, or screen lock.")}
                         }

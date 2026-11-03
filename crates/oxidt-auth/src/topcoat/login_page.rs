@@ -251,9 +251,7 @@ pub async fn local_login_page(
                             >
                                 icon(d: FINGERPRINT, class: "h-8 w-8", stroke_width: "1.5")
                             </div>
-                            <p class="font-medium">
-                                (t("Skip the email code next time"))
-                            </p>
+                            <p class="font-medium">(t("Sign in faster next time"))</p>
                             <p class="text-sm text-base-content/50">
                                 (t(
                                     "Add a passkey to sign in with your fingerprint, face, or screen lock.",
