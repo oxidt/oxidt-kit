@@ -18,6 +18,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
 ] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1.0"

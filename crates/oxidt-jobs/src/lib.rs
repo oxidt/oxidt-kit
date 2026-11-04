@@ -5,14 +5,21 @@
 //! workers. The app owns the typed task enum, its handlers and the recurring
 //! schedule, through [`Handler`]; this crate owns the SQL and the worker loop.
 use chrono::{DateTime, Utc};
+use futures_util::FutureExt;
 use sqlx::{PgConnection, PgPool};
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
-/// A running attempt gets this long, shorter than the lease below.
+/// A running attempt gets this long unless [`Handler::attempt_timeout`] says otherwise.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const LEASE_SECS: i32 = 90;
+/// A running attempt renews its lease this often. Two periods without a
+/// confirmed renewal drop the attempt, a period before the lease can lapse and
+/// another worker can claim the job.
+const LEASE_RENEWAL: Duration = Duration::from_secs(30);
 const IDLE_POLL: Duration = Duration::from_secs(2);
 
 /// Queue `payload` (by convention tagged `"type": kind`) to run at `run_at`;
@@ -85,6 +92,14 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Job>, sqlx::Error> {
     .await
 }
 
+/// Extend a running attempt's lease. False means it is no longer this
+/// attempt's to extend.
+async fn renew(pool: &PgPool, job: &Job) -> Result<bool, sqlx::Error> {
+    let renewed = sqlx::query("UPDATE background_jobs SET lease_until=NOW()+make_interval(secs => $3) WHERE id=$1 AND lease_token=$2 AND status='running'")
+        .bind(job.id).bind(job.lease_token).bind(LEASE_SECS).execute(pool).await?;
+    Ok(renewed.rows_affected() == 1)
+}
+
 /// Acknowledge an attempt. A no-op if the lease has since passed to another
 /// worker.
 pub async fn finish(
@@ -115,6 +130,11 @@ pub trait Handler: Clone + Send + Sync + 'static {
     /// Run one attempt: deserialize `job.payload` into the app's task enum and
     /// dispatch.
     fn execute(&self, job: &Job) -> impl Future<Output = Result<(), JobFailure>> + Send;
+    /// How long this attempt may run. The lease is renewed meanwhile, so this
+    /// can exceed it. Shutdown waits for a running attempt.
+    fn attempt_timeout(&self, _job: &Job) -> Duration {
+        ATTEMPT_TIMEOUT
+    }
     /// Insert recurring jobs, deduplicated by a time-bucketed `dedupe_key` so
     /// replicas racing here enqueue once. Called by the first worker each poll.
     fn schedule(&self) -> impl Future<Output = Result<(), sqlx::Error>> + Send;
@@ -152,14 +172,18 @@ async fn work<H: Handler>(
         if *stopping.borrow() {
             break;
         }
-        if schedules && let Err(error) = handler.schedule().await {
-            tracing::error!(%error, "Job scheduler failed");
+        if schedules {
+            match AssertUnwindSafe(handler.schedule()).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(%error, "Job scheduler failed"),
+                Err(_) => tracing::error!("Job scheduler panicked"),
+            }
         }
         match claim(handler.pool()).await {
             Ok(Some(job)) => {
-                let outcome = tokio::time::timeout(ATTEMPT_TIMEOUT, handler.execute(&job))
-                    .await
-                    .unwrap_or(Err(JobFailure::Safe("Job timed out")));
+                let Some(outcome) = attempt(&handler, &job, LEASE_RENEWAL).await else {
+                    continue;
+                };
                 if let Err(JobFailure::Safe(reason) | JobFailure::RetryAfter(reason, _)) = &outcome
                 {
                     tracing::warn!(job_id=%job.id, reason, "Job attempt failed");
@@ -173,6 +197,48 @@ async fn work<H: Handler>(
             Err(error) => tracing::error!(%error, "Job claim failed"),
         }
         tokio::select! { _ = stopping.changed() => break, _ = tokio::time::sleep(IDLE_POLL) => {} }
+    }
+}
+
+/// Run one attempt, renewing its lease. A panic or timeout is a failed
+/// attempt; `None` means the lease was lost or could not be confirmed, so the
+/// attempt is dropped unacknowledged.
+async fn attempt<H: Handler>(
+    handler: &H,
+    job: &Job,
+    renew_every: Duration,
+) -> Option<Result<(), JobFailure>> {
+    let run = tokio::time::timeout(
+        handler.attempt_timeout(job),
+        AssertUnwindSafe(handler.execute(job)).catch_unwind(),
+    );
+    let keep_lease = async {
+        let mut give_up_at = Instant::now() + renew_every * 2;
+        loop {
+            tokio::time::sleep_until(give_up_at.min(Instant::now() + renew_every)).await;
+            let started = Instant::now();
+            if started >= give_up_at {
+                break;
+            }
+            match tokio::time::timeout_at(give_up_at, renew(handler.pool(), job)).await {
+                Ok(Ok(true)) => give_up_at = started + renew_every * 2,
+                Ok(Ok(false)) | Err(_) => break,
+                Ok(Err(error)) => {
+                    tracing::error!(%error, job_id=%job.id, "Job lease renewal failed");
+                }
+            }
+        }
+    };
+    tokio::select! {
+        outcome = run => Some(match outcome {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(JobFailure::Safe("Job panicked")),
+            Err(_) => Err(JobFailure::Safe("Job timed out")),
+        }),
+        () = keep_lease => {
+            tracing::warn!(job_id=%job.id, "Job lease lost, dropping attempt");
+            None
+        }
     }
 }
 
@@ -375,5 +441,153 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// Does what the payload says, and optionally panics while scheduling.
+    #[derive(Clone)]
+    struct Scripted {
+        pool: PgPool,
+        panic_in_schedule: bool,
+    }
+    impl Handler for Scripted {
+        fn pool(&self) -> &PgPool {
+            &self.pool
+        }
+        async fn execute(&self, job: &Job) -> Result<(), JobFailure> {
+            match job.payload["do"].as_str() {
+                Some("panic") => panic!("told to panic"),
+                Some("hang") => std::future::pending().await,
+                _ => Ok(()),
+            }
+        }
+        fn attempt_timeout(&self, job: &Job) -> Duration {
+            job.payload["timeout_ms"]
+                .as_u64()
+                .map_or(ATTEMPT_TIMEOUT, Duration::from_millis)
+        }
+        async fn schedule(&self) -> Result<(), sqlx::Error> {
+            assert!(!self.panic_in_schedule, "told to panic");
+            Ok(())
+        }
+    }
+    fn scripted(pool: &PgPool) -> Scripted {
+        Scripted {
+            pool: pool.clone(),
+            panic_in_schedule: false,
+        }
+    }
+    async fn add_scripted(pool: &PgPool, kind: &str, priority: i32, payload: serde_json::Value) {
+        let mut conn = pool.acquire().await.unwrap();
+        enqueue(&mut conn, None, kind, payload, priority, Utc::now(), None)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn workers_survive_panics_in_jobs_and_schedule(pool: PgPool) {
+        setup(&pool).await;
+        add_scripted(&pool, "boom", 10, serde_json::json!({ "do": "panic" })).await;
+        add_scripted(&pool, "next", 0, serde_json::json!({})).await;
+        let handler = Scripted {
+            panic_in_schedule: true,
+            ..scripted(&pool)
+        };
+        let (stop, handle) = spawn(handler, 1);
+        let summary = || async {
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT kind, status, last_error FROM background_jobs ORDER BY kind",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let mut rows = summary().await;
+        for _ in 0..50 {
+            if rows[1].1 == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            rows = summary().await;
+        }
+        assert_eq!(
+            rows,
+            [
+                ("boom".into(), "pending".into(), Some("Job panicked".into())),
+                ("next".into(), "completed".into(), None)
+            ]
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn running_attempts_renew_their_lease_until_they_time_out(pool: PgPool) {
+        setup(&pool).await;
+        let payload = serde_json::json!({ "do": "hang", "timeout_ms": 1500 });
+        add_scripted(&pool, "slow", 0, payload).await;
+        let job = claim(&pool).await.unwrap().unwrap();
+        sqlx::query("UPDATE background_jobs SET lease_until=NOW()+INTERVAL '1 second'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = attempt(&scripted(&pool), &job, Duration::from_millis(500)).await;
+        assert!(matches!(
+            outcome,
+            Some(Err(JobFailure::Safe("Job timed out")))
+        ));
+        let remaining: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM lease_until - NOW())::FLOAT8 FROM background_jobs",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(remaining > 60.0, "lease was not renewed: {remaining}s left");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn losing_the_lease_drops_the_attempt(pool: PgPool) {
+        setup(&pool).await;
+        add_scripted(&pool, "slow", 0, serde_json::json!({ "do": "hang" })).await;
+        let job = claim(&pool).await.unwrap().unwrap();
+        sqlx::query("UPDATE background_jobs SET lease_token=gen_random_uuid()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let handler = scripted(&pool);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            attempt(&handler, &job, Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_none());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn unconfirmed_renewals_drop_the_attempt(pool: PgPool) {
+        setup(&pool).await;
+        // Renewing errors at once on the closed pool and stalls on the unreachable one.
+        for closed in [true, false] {
+            add_scripted(&pool, "slow", 0, serde_json::json!({ "do": "hang" })).await;
+            let job = claim(&pool).await.unwrap().unwrap();
+            let unreachable = PgPool::connect_lazy("postgres://127.0.0.1:1/none").unwrap();
+            if closed {
+                unreachable.close().await;
+            }
+            let handler = Scripted {
+                pool: unreachable,
+                panic_in_schedule: false,
+            };
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(5),
+                attempt(&handler, &job, Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+            assert!(outcome.is_none());
+        }
     }
 }

@@ -47,5 +47,11 @@ Enqueue inside the domain transaction with
 `oxidt_jobs::enqueue(&mut tx, owner, task.kind(), payload, task.priority(), run_at, dedupe_key)`.
 
 Failure messages land in `last_error`, so they are fixed categories
-(`&'static str`), never provider responses or payloads. Attempts time out after
-60 seconds; leases last 90.
+(`&'static str`), never provider responses or payloads.
+
+Attempts time out after 60 seconds; override `Handler::attempt_timeout` for
+longer jobs. Leases last 90 seconds and renew every 30 while an attempt runs. A
+worker drops the attempt if it loses the lease or goes 60 seconds without a
+confirmed renewal, so two workers don't overlap during a database outage. Panics
+count as failed attempts and the worker keeps running. Shutdown waits for a
+running attempt.
