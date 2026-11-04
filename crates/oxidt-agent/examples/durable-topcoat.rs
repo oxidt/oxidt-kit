@@ -1,5 +1,5 @@
 //! PostgreSQL example: MCP submission → separate human approval → background action.
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension, Form, Router,
@@ -146,6 +146,11 @@ async fn review_page(cx: &Cx) -> topcoat::Result<impl View> {
         .review(reviewer, id)
         .await
         .map_err(|_| topcoat::Error::msg("Request is unavailable"))?;
+    let allowances = actions
+        .allowances(reviewer)
+        .await
+        .map_err(|_| topcoat::Error::msg("Allowances are unavailable"))?;
+    let allowable = row.definition["allowances"] == true;
     let arguments = serde_json::to_string_pretty(&row.arguments)?;
     let result = row
         .result
@@ -181,13 +186,43 @@ async fn review_page(cx: &Cx) -> topcoat::Result<impl View> {
                         <button name="decision" value="approve" type="submit">
                             "Approve action"
                         </button>
+                        if allowable {
+                            <button name="decision" value="allow" type="submit">
+                                "Approve and allow for 1 hour"
+                            </button>
+                        }
                         <button name="decision" value="reject" type="submit">
                             "Reject action"
                         </button>
                     </form>
+                    if allowable {
+                        <p>
+                            "Allowing skips review of this action from this agent for 1 hour, whatever its arguments."
+                        </p>
+                    }
                 }
                 if let Some(result) = result {
                     <pre>(result)</pre>
+                }
+                if !allowances.is_empty() {
+                    <h2>"Active allowances"</h2>
+                }
+                for allowance in &allowances {
+                    <form method="post" action="/review/allowance/revoke">
+                        <input type="hidden" name="id" value=(id.to_string()) />
+                        <input
+                            type="hidden"
+                            name="allowance"
+                            value=(allowance.id.to_string())
+                        />
+                        (&allowance.name)
+                        " · Agent: "
+                        (&allowance.client_id)
+                        " · Until: "
+                        (allowance.expires_at.to_rfc3339())
+                        " "
+                        <button type="submit">"Revoke"</button>
+                    </form>
                 }
                 <p><a href=(format!("/review?id={id}"))>"Refresh status"</a></p>
             </body>
@@ -205,21 +240,52 @@ async fn decide(
     Extension(reviewer): Extension<Reviewer>,
     Form(input): Form<Decision>,
 ) -> Response {
-    let approve = match input.decision.as_str() {
-        "approve" => true,
-        "reject" => false,
+    let outcome = match input.decision.as_str() {
+        "approve" => {
+            actions
+                .decide(&reviewer, input.id, true, &DemoIdentity)
+                .await
+        }
+        "reject" => {
+            actions
+                .decide(&reviewer, input.id, false, &DemoIdentity)
+                .await
+        }
+        "allow" => {
+            actions
+                .approve_and_allow(
+                    &reviewer,
+                    input.id,
+                    Duration::from_secs(3600),
+                    &DemoIdentity,
+                )
+                .await
+        }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
-    match actions
-        .decide(&reviewer, input.id, approve, &DemoIdentity)
-        .await
-    {
+    match outcome {
         Ok(_) => Redirect::to(&format!("/review?id={}", input.id)).into_response(),
         Err(_) => (
             StatusCode::CONFLICT,
             "Request is unavailable or no longer awaiting this decision",
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Revocation {
+    id: Uuid,
+    allowance: Uuid,
+}
+async fn revoke(
+    Extension(actions): Extension<Arc<Actions>>,
+    Extension(reviewer): Extension<Reviewer>,
+    Form(input): Form<Revocation>,
+) -> Response {
+    match actions.revoke_allowance(&reviewer, input.allowance).await {
+        Ok(()) => Redirect::to(&format!("/review?id={}", input.id)).into_response(),
+        Err(_) => (StatusCode::CONFLICT, "Allowance is unavailable").into_response(),
     }
 }
 
@@ -235,6 +301,7 @@ fn review_routes(actions: Arc<Actions>, review_credential: HeaderValue) -> Route
     Router::new()
         .route_service("/review", topcoat::router::tower::TowerService::new(pages))
         .route("/review/decision", post(decide))
+        .route("/review/allowance/revoke", post(revoke))
         .layer(Extension(actions))
         .layer(middleware::from_fn(move |mut req: Request, next: Next| {
             let valid =
@@ -308,7 +375,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Save a note in your tenant's notebook",
             "notes:write",
             Effect::Write,
-        ),
+        )
+        .with_allowances(),
         SaveNote,
     )?;
     let actions = Arc::new(actions);

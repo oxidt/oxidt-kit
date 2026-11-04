@@ -5,7 +5,7 @@
 //! external effects here: enqueue an outbox entry in this transaction instead.
 //! An action row lock serializes attempts; the mutation and result commit together.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -15,6 +15,9 @@ use sqlx::{FromRow, PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::{Agent, Approval, Capability, Principal, RegistrationError, ToolError};
+
+/// The longest a reviewer can pre-approve an action for.
+pub const MAX_ALLOWANCE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Only the application's authenticated browser/reviewer path may construct this.
 /// The requesting user can review their own actions in the selected tenant.
@@ -134,6 +137,20 @@ pub struct RequestRecord {
     pub result: Option<Value>,
     pub reviewed_by: Option<String>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    /// The allowance that authorized this request, if any. Revoking it stops
+    /// the request unless it has already run.
+    pub allowance_id: Option<Uuid>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// A time-limited pre-approval of one capability version for one exact grant.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct Allowance {
+    pub id: Uuid,
+    pub client_id: String,
+    pub grant_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -160,6 +177,8 @@ pub enum Error {
     Unavailable,
     #[error("Request no longer matches this operation or decision")]
     Conflict,
+    #[error("An allowance must last longer than zero and at most seven days")]
+    InvalidAllowance,
     #[error("Action storage is unavailable")]
     Storage(#[from] sqlx::Error),
     #[error("Action attempt failed: {0}")]
@@ -171,6 +190,7 @@ impl From<Error> for ToolError {
         let code = match error {
             Error::Unavailable => "unavailable",
             Error::Conflict => "conflict",
+            Error::InvalidAllowance => "invalid_allowance",
             Error::Storage(_) => "storage_unavailable",
             Error::Attempt(code) => code,
         };
@@ -248,12 +268,16 @@ impl Actions {
         if self.entries.contains_key(&capability.name) {
             return Err(RegistrationError::Duplicate(capability.name));
         }
-        let definition = json!({
+        let mut definition = json!({
             "name": capability.name, "version": capability.version,
             "description": capability.description, "permission": capability.permission,
             "effect": format!("{:?}", capability.effect), "approval": format!("{:?}", capability.approval),
             "input": schemars::schema_for!(A::Input), "output": schemars::schema_for!(A::Output),
         });
+        // Part of the definition, so withdrawing the opt-in voids existing allowances.
+        if capability.allowances {
+            definition["allowances"] = json!(true);
+        }
         let pool = self.pool.clone();
         let spec = definition.clone();
         let cap = capability.clone();
@@ -337,13 +361,73 @@ impl Actions {
 
     /// Human decision, outside MCP. Approval + queue insert commit together.
     /// Repeated identical decisions are harmless; conflicting decisions are rejected.
-    #[tracing::instrument(name = "agent.decide", skip_all, err(Display),
-        fields(agent.request_id = %id, agent.approve = approve, agent.status = tracing::field::Empty))]
     pub async fn decide<R: ResolveIdentity>(
         &self,
         reviewer: &Reviewer,
         id: Uuid,
         approve: bool,
+        resolver: &R,
+    ) -> Result<Receipt, Error> {
+        self.settle(reviewer, id, approve, None, resolver).await
+    }
+
+    /// Human decision, outside MCP: approve this request and, for `allow_for`,
+    /// queue later submissions of this capability version from the same grant
+    /// without review, whatever their arguments. The capability must opt in with
+    /// `with_allowances`. A repeated call does not extend the allowance.
+    pub async fn approve_and_allow<R: ResolveIdentity>(
+        &self,
+        reviewer: &Reviewer,
+        id: Uuid,
+        allow_for: Duration,
+        resolver: &R,
+    ) -> Result<Receipt, Error> {
+        if allow_for.is_zero() || allow_for > MAX_ALLOWANCE {
+            return Err(Error::InvalidAllowance);
+        }
+        self.settle(reviewer, id, true, Some(allow_for), resolver)
+            .await
+    }
+
+    /// The reviewer's unexpired allowances, for the host's review UI.
+    pub async fn allowances(&self, reviewer: &Reviewer) -> Result<Vec<Allowance>, Error> {
+        Ok(sqlx::query_as(
+            "SELECT id,client_id,grant_id,name,created_at,expires_at FROM agent_allowances \
+             WHERE user_id=$1 AND tenant_id=$2 AND revoked_at IS NULL AND expires_at > clock_timestamp() \
+             ORDER BY created_at DESC",
+        )
+        .bind(&reviewer.user_id)
+        .bind(&reviewer.tenant_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Human decision, outside MCP. Waits for a running attempt; once this
+    /// returns, nothing else runs under the allowance.
+    pub async fn revoke_allowance(&self, reviewer: &Reviewer, id: Uuid) -> Result<(), Error> {
+        let revoked = sqlx::query(
+            "UPDATE agent_allowances SET revoked_at=COALESCE(revoked_at,NOW()) \
+             WHERE id=$1 AND user_id=$2 AND tenant_id=$3",
+        )
+        .bind(id)
+        .bind(&reviewer.user_id)
+        .bind(&reviewer.tenant_id)
+        .execute(&self.pool)
+        .await?;
+        if revoked.rows_affected() == 0 {
+            return Err(Error::Unavailable);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "agent.decide", skip_all, err(Display),
+        fields(agent.request_id = %id, agent.approve = approve, agent.status = tracing::field::Empty))]
+    async fn settle<R: ResolveIdentity>(
+        &self,
+        reviewer: &Reviewer,
+        id: Uuid,
+        approve: bool,
+        allow_for: Option<Duration>,
         resolver: &R,
     ) -> Result<Receipt, Error> {
         let mut tx = self.pool.begin().await?;
@@ -361,9 +445,21 @@ impl Actions {
                 && row.reviewed_by.is_some()
                 && matches!(row.status.as_str(), "queued" | "completed"))
         {
+            // A one-time approval cannot become an allowance after the fact.
+            if allow_for.is_some() && row.allowance_id.is_none() {
+                return Err(Error::Conflict);
+            }
             return Ok(row.receipt());
         }
         if row.status != "pending" {
+            return Err(Error::Conflict);
+        }
+        if allow_for.is_some()
+            && !self
+                .entries
+                .get(&row.name)
+                .is_some_and(|entry| entry.capability.allowances)
+        {
             return Err(Error::Conflict);
         }
         let expired: bool = sqlx::query_scalar(
@@ -382,12 +478,17 @@ impl Actions {
                 None => "invalidated",
             }
         };
+        let allowance_id = match allow_for {
+            Some(duration) if status == "queued" => Some(allow(&mut tx, &row, duration).await?),
+            _ => None,
+        };
         sqlx::query(
-            "UPDATE agent_actions SET status=$2,reviewed_by=$3,reviewed_at=NOW() WHERE id=$1",
+            "UPDATE agent_actions SET status=$2,reviewed_by=$3,reviewed_at=NOW(),allowance_id=$4 WHERE id=$1",
         )
         .bind(id)
         .bind(status)
         .bind(&reviewer.user_id)
+        .bind(allowance_id)
         .execute(&mut *tx)
         .await?;
         if status == "queued" {
@@ -474,8 +575,20 @@ impl Actions {
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
+        // Checked here, not only at submission: a revocation may have raced it.
+        // The share lock makes `revoke_allowance` wait for this attempt.
+        let revoked = match row.allowance_id {
+            Some(allowance) => sqlx::query(
+                "SELECT 1 FROM agent_allowances WHERE id=$1 AND revoked_at IS NULL FOR SHARE",
+            )
+            .bind(allowance)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none(),
+            None => false,
+        };
         let entry = self.entries.get(&row.name);
-        let principal = if expired || entry.is_none() {
+        let principal = if expired || revoked || entry.is_none() {
             None
         } else {
             self.current(&mut tx, &row, resolver).await?
@@ -554,6 +667,52 @@ async fn enqueue(connection: &mut PgConnection, id: Uuid) -> Result<(), sqlx::Er
     .await
 }
 
+/// Create or replace the active allowance for this request's grant and capability.
+async fn allow(
+    connection: &mut PgConnection,
+    row: &RequestRecord,
+    duration: Duration,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO agent_allowances (id,user_id,tenant_id,client_id,grant_id,name,definition,expires_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+make_interval(secs => $8)) \
+         ON CONFLICT (user_id,tenant_id,client_id,grant_id,name) WHERE revoked_at IS NULL \
+         DO UPDATE SET definition=EXCLUDED.definition, expires_at=EXCLUDED.expires_at RETURNING id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&row.user_id)
+    .bind(&row.tenant_id)
+    .bind(&row.client_id)
+    .bind(&row.grant_id)
+    .bind(&row.name)
+    .bind(&row.definition)
+    .bind(duration.as_secs_f64())
+    .fetch_one(connection)
+    .await
+}
+
+/// An unexpired allowance for exactly this grant and capability definition.
+async fn allowance(
+    connection: &mut PgConnection,
+    principal: &Principal,
+    capability: &Capability,
+    definition: &Value,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT id FROM agent_allowances WHERE user_id=$1 AND tenant_id=$2 AND client_id=$3 \
+         AND grant_id=$4 AND name=$5 AND definition=$6 AND revoked_at IS NULL \
+         AND expires_at > clock_timestamp()",
+    )
+    .bind(&principal.user_id)
+    .bind(&principal.tenant_id)
+    .bind(&principal.client_id)
+    .bind(&principal.grant_id)
+    .bind(&capability.name)
+    .bind(definition)
+    .fetch_optional(connection)
+    .await
+}
+
 async fn submit(
     pool: &PgPool,
     capability: &Capability,
@@ -567,14 +726,22 @@ async fn submit(
     }
     // Correlates this MCP call with the later decide/execute spans.
     tracing::Span::current().record("agent.request_id", tracing::field::display(id));
-    let status = if capability.approval == Approval::Required {
+    let mut tx = pool.begin().await?;
+    let required = capability.approval == Approval::Required;
+    let allowance_id = if required && capability.allowances {
+        allowance(&mut tx, &principal, capability, definition).await?
+    } else {
+        None
+    };
+    let status = if required && allowance_id.is_none() {
         "pending"
     } else {
         "queued"
     };
-    let mut tx = pool.begin().await?;
-    let inserted = sqlx::query("INSERT INTO agent_actions (id,user_id,tenant_id,client_id,grant_id,name,definition,arguments,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING")
-        .bind(id).bind(&principal.user_id).bind(&principal.tenant_id).bind(&principal.client_id).bind(&principal.grant_id).bind(&capability.name).bind(definition).bind(&arguments).bind(status)
+    // The allowance stands in for the requesting user's own review.
+    let reviewed_by = allowance_id.map(|_| &principal.user_id);
+    let inserted = sqlx::query("INSERT INTO agent_actions (id,user_id,tenant_id,client_id,grant_id,name,definition,arguments,status,reviewed_by,reviewed_at,allowance_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,CASE WHEN $10::TEXT IS NULL THEN NULL ELSE NOW() END,$11) ON CONFLICT (id) DO NOTHING")
+        .bind(id).bind(&principal.user_id).bind(&principal.tenant_id).bind(&principal.client_id).bind(&principal.grant_id).bind(&capability.name).bind(definition).bind(&arguments).bind(status).bind(reviewed_by).bind(allowance_id)
         .execute(&mut *tx).await?.rows_affected();
     let row: RequestRecord = sqlx::query_as("SELECT * FROM agent_actions WHERE id=$1 FOR UPDATE")
         .bind(id)

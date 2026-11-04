@@ -146,6 +146,26 @@ Only the requesting identity with the action's current permission can read it.
    `get_action` returns its `{"code","message"}` as `error`. Retries in
    progress poll as `queued`/`running`.
 
+### Allowances
+
+To stop reviewing every call from a trusted client, opt a capability in with
+`Capability::with_allowances()`. The host can then offer "allow for an hour"
+beside "approve once" by calling `Actions::approve_and_allow(reviewer, id,
+duration, resolver)`, for at most `MAX_ALLOWANCE` (seven days).
+
+While the allowance lasts, new submissions of that capability queue without
+review. **It covers any arguments**, so say so in the review UI, and don't opt in
+actions that are unsafe with arguments nobody read. It is bound to the exact
+user, tenant, client, grant and capability definition, so bumping the version,
+removing the opt-in or using another grant returns to per-request review.
+Execution still resolves the grant and permissions every time.
+
+List allowances with `Actions::allowances` and offer
+`Actions::revoke_allowance`. Revoking stops queued requests too, and marks them
+`invalidated`. Like approval, this is never an MCP tool.
+
+### Expiry and retention
+
 Requests expire after 24 hours, checked again before execution starts. Changes
 to a capability's stored definition invalidate pending/queued work; bump its
 version whenever handler semantics change. Business-specific revision checks
@@ -177,6 +197,10 @@ submit `add_note` using the envelope above, then paste the returned ID into the
 page. The browser reviewer login is `owner`, with `AGENT_REVIEW_TOKEN` as its
 password. Approve/reject the displayed arguments, then refresh or use `get_action`.
 The saved note and execution result survive restarts.
+
+"Approve and allow for 1 hour" queues further `add_note` calls without review.
+Active allowances appear on the review page with a Revoke button. A demo database
+created before allowances existed needs recreating with `--init`.
 
 This local demo uses distinct static agent/reviewer credentials and a fixed
 identity resolver. Production apps supply their existing login, CSRF protection,

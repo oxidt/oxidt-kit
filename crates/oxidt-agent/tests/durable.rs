@@ -2,15 +2,20 @@
 
 use oxidt_agent::{
     Agent, Approval, Capability, Effect, Principal, ToolError,
-    durable::{Action, ActionContext, Actions, Error, Identity, ResolveIdentity, Reviewer},
+    durable::{
+        Action, ActionContext, Actions, Error, Identity, MAX_ALLOWANCE, ResolveIdentity, Reviewer,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -549,4 +554,241 @@ async fn overlapping_attempts_after_lease_expiry_commit_only_one_effect(pool: Pg
     );
     oxidt_jobs::finish(&pool, &second, Ok(())).await.unwrap();
     assert_eq!(count(&pool).await, 1);
+}
+
+const HOUR: Duration = Duration::from_secs(3600);
+
+fn allowing(pool: &PgPool, version: &str) -> (Agent, Arc<Actions>) {
+    let mut agent = Agent::new();
+    let mut actions = Actions::new(pool.clone());
+    actions
+        .register(
+            &mut agent,
+            Capability::new("save", "Save note", "notes:write", Effect::Write)
+                .with_version(version)
+                .with_allowances(),
+            Save {
+                fail_once: Arc::new(AtomicBool::new(false)),
+            },
+        )
+        .unwrap();
+    (agent, Arc::new(actions))
+}
+async fn submit_as(agent: &Agent, principal: Principal) -> (Uuid, String) {
+    let id = Uuid::new_v4();
+    let receipt = agent
+        .invoke(
+            principal,
+            "save",
+            json!({"request_id":id,"arguments":{"text":"anything"}}),
+        )
+        .await
+        .unwrap();
+    (id, receipt["status"].as_str().unwrap().to_string())
+}
+/// Approve a first request with a one hour allowance and run it.
+async fn allow(pool: &PgPool, agent: &Agent, actions: &Actions) -> Uuid {
+    let id = Uuid::new_v4();
+    submit(agent, id).await;
+    let resolver = Resolver(AtomicBool::new(true));
+    actions
+        .approve_and_allow(&reviewer(), id, HOUR, &resolver)
+        .await
+        .unwrap();
+    run_next(pool, actions).await;
+    id
+}
+async fn run_next(pool: &PgPool, actions: &Actions) {
+    let job = oxidt_jobs::claim(pool).await.unwrap().unwrap();
+    let result = actions
+        .execute_job(&job, &Resolver(AtomicBool::new(true)))
+        .await;
+    oxidt_jobs::finish(pool, &job, result).await.unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn allowance_queues_later_submissions_with_any_arguments(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    allow(&pool, &agent, &actions).await;
+    assert_eq!(count(&pool).await, 1);
+
+    let (id, status) = submit_as(&agent, principal()).await;
+    assert_eq!(status, "queued");
+    run_next(&pool, &actions).await;
+    let row = actions.get(&principal(), id).await.unwrap();
+    assert_eq!(row.status, "completed");
+    assert_eq!(row.reviewed_by.as_deref(), Some("owner"));
+    assert!(row.allowance_id.is_some());
+    assert_eq!(count(&pool).await, 2);
+}
+
+#[sqlx::test(migrations = false)]
+async fn allowance_is_bound_to_exact_identity_and_definition(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    allow(&pool, &agent, &actions).await;
+
+    for change in [
+        |p: &mut Principal| p.client_id = "client-b".into(),
+        |p: &mut Principal| p.grant_id = "grant-b".into(),
+        |p: &mut Principal| p.user_id = "someone-else".into(),
+        |p: &mut Principal| p.tenant_id = "tenant-b".into(),
+    ] {
+        let mut other = principal();
+        change(&mut other);
+        assert_eq!(submit_as(&agent, other).await.1, "pending");
+    }
+    let (next_version, _) = allowing(&pool, "2");
+    assert_eq!(submit_as(&next_version, principal()).await.1, "pending");
+    assert_eq!(submit_as(&agent, principal()).await.1, "queued");
+}
+
+#[sqlx::test(migrations = false)]
+async fn capabilities_must_opt_in_to_allowances(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = registry(&pool, "1", Approval::Required, false);
+    let id = Uuid::new_v4();
+    submit(&agent, id).await;
+    let resolver = Resolver(AtomicBool::new(true));
+    assert!(matches!(
+        actions
+            .approve_and_allow(&reviewer(), id, HOUR, &resolver)
+            .await,
+        Err(Error::Conflict)
+    ));
+    assert_eq!(
+        actions.get(&principal(), id).await.unwrap().status,
+        "pending"
+    );
+    assert!(actions.allowances(&reviewer()).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = false)]
+async fn allowance_duration_is_bounded(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    let id = Uuid::new_v4();
+    submit(&agent, id).await;
+    let resolver = Resolver(AtomicBool::new(true));
+    for duration in [Duration::ZERO, MAX_ALLOWANCE + Duration::from_secs(1)] {
+        assert!(matches!(
+            actions
+                .approve_and_allow(&reviewer(), id, duration, &resolver)
+                .await,
+            Err(Error::InvalidAllowance)
+        ));
+    }
+    actions
+        .approve_and_allow(&reviewer(), id, MAX_ALLOWANCE, &resolver)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn expired_allowance_returns_to_review(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    allow(&pool, &agent, &actions).await;
+    sqlx::query("UPDATE agent_allowances SET expires_at=NOW()-INTERVAL '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(submit_as(&agent, principal()).await.1, "pending");
+    assert!(actions.allowances(&reviewer()).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = false)]
+async fn revoking_stops_new_and_queued_requests(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    allow(&pool, &agent, &actions).await;
+    let (queued, status) = submit_as(&agent, principal()).await;
+    assert_eq!(status, "queued");
+
+    let allowance = actions.allowances(&reviewer()).await.unwrap().remove(0);
+    let stranger = Reviewer {
+        user_id: "stranger".into(),
+        tenant_id: "tenant-a".into(),
+    };
+    assert!(matches!(
+        actions.revoke_allowance(&stranger, allowance.id).await,
+        Err(Error::Unavailable)
+    ));
+    assert_eq!(submit_as(&agent, principal()).await.1, "queued");
+    run_next(&pool, &actions).await;
+    assert_eq!(count(&pool).await, 2);
+
+    actions
+        .revoke_allowance(&reviewer(), allowance.id)
+        .await
+        .unwrap();
+    actions
+        .revoke_allowance(&reviewer(), allowance.id)
+        .await
+        .unwrap();
+    assert_eq!(submit_as(&agent, principal()).await.1, "pending");
+    run_next(&pool, &actions).await;
+    assert_eq!(count(&pool).await, 2);
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM agent_actions WHERE allowance_id IS NOT NULL ORDER BY created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(statuses, ["completed", "completed", "invalidated"]);
+    assert_ne!(
+        actions.get(&principal(), queued).await.unwrap().status,
+        "queued"
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn repeated_allow_does_not_extend_and_one_time_approval_cannot_upgrade(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    let id = allow(&pool, &agent, &actions).await;
+    let before = actions.allowances(&reviewer()).await.unwrap().remove(0);
+    let resolver = Resolver(AtomicBool::new(true));
+    actions
+        .approve_and_allow(&reviewer(), id, MAX_ALLOWANCE, &resolver)
+        .await
+        .unwrap();
+    let after = actions.allowances(&reviewer()).await.unwrap().remove(0);
+    assert_eq!(before.expires_at, after.expires_at);
+
+    let (once, _) = submit_as(
+        &agent,
+        Principal {
+            grant_id: "grant-b".into(),
+            ..principal()
+        },
+    )
+    .await;
+    actions
+        .decide(&reviewer(), once, true, &resolver)
+        .await
+        .unwrap();
+    assert!(matches!(
+        actions
+            .approve_and_allow(&reviewer(), once, HOUR, &resolver)
+            .await,
+        Err(Error::Conflict)
+    ));
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_new_allowance_replaces_the_active_one(pool: PgPool) {
+    setup(&pool).await;
+    let (agent, actions) = allowing(&pool, "1");
+    allow(&pool, &agent, &actions).await;
+    let (next_version, next_actions) = allowing(&pool, "2");
+    let (id, _) = submit_as(&next_version, principal()).await;
+    next_actions
+        .approve_and_allow(&reviewer(), id, HOUR, &Resolver(AtomicBool::new(true)))
+        .await
+        .unwrap();
+    assert_eq!(actions.allowances(&reviewer()).await.unwrap().len(), 1);
+    assert_eq!(submit_as(&agent, principal()).await.1, "pending");
+    assert_eq!(submit_as(&next_version, principal()).await.1, "queued");
 }

@@ -35,6 +35,8 @@ pub struct Capability {
     pub permission: String,
     pub effect: Effect,
     pub approval: Approval,
+    /// A reviewer may pre-approve this durable action for a limited time. Off by default.
+    pub allowances: bool,
 }
 
 impl Capability {
@@ -51,11 +53,19 @@ impl Capability {
             } else {
                 Approval::Required
             },
+            allowances: false,
         }
     }
 
     pub fn with_approval(mut self, approval: Approval) -> Self {
         self.approval = approval;
+        self
+    }
+
+    /// Only for actions safe to run with any arguments once a reviewer trusts the
+    /// client: an allowance covers every later submission, not one reviewed payload.
+    pub fn with_allowances(mut self) -> Self {
+        self.allowances = true;
         self
     }
 
