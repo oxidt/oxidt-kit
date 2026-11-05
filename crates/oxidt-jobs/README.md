@@ -55,3 +55,25 @@ worker drops the attempt if it loses the lease or goes 60 seconds without a
 confirmed renewal, so two workers don't overlap during a database outage. Panics
 count as failed attempts and the worker keeps running. Shutdown waits for a
 running attempt.
+
+## Watching it
+
+`oxidt_jobs::stats(&pool)` reads the queue from the table: jobs due, scheduled
+and running, failures in the last 24 hours, and how long the oldest due job has
+waited. Alert on `oldest_due_seconds`, which climbs when the worker stops as well
+as when it falls behind. With the `monitor` feature, `Stats::kpis()` gives the
+same numbers as `oxidt-monitor` KPIs:
+
+```rust
+async fn kpis(&self) -> Vec<Kpi> {
+    oxidt_jobs::stats(&self.0.db.pool).await.map(|s| s.kpis()).unwrap_or_default()
+}
+```
+
+Keep these out of `/health`: a backlog is a reason to look, not to restart.
+
+Each attempt runs in a `job.attempt` span with `job.id`, `job.kind`,
+`job.attempt` and `job.outcome` (`completed`, `retrying`, `failed`, `lease_lost`
+or `unacknowledged`). Outcomes are logged once recorded. Attempts log at `info` on success, `warn` when they will retry and
+`error` with "Job failed permanently" when out of attempts, including a worker
+that died on its last one.

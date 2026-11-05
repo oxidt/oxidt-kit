@@ -11,6 +11,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::time::Instant;
+use tracing::Instrument;
 use uuid::Uuid;
 
 /// A running attempt gets this long unless [`Handler::attempt_timeout`] says otherwise.
@@ -46,6 +47,7 @@ pub async fn enqueue(
 pub struct Job {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
+    pub kind: String,
     pub payload: serde_json::Value,
     /// Counted at claim, so this attempt is the last when `attempts >= max_attempts`.
     pub attempts: i32,
@@ -70,8 +72,11 @@ impl From<&'static str> for JobFailure {
 
 pub async fn claim(pool: &PgPool) -> Result<Option<Job>, sqlx::Error> {
     // A crash on the final attempt must become visible as a failure too.
-    sqlx::query("UPDATE background_jobs SET status='failed', last_error='Worker lease expired', finished_at=NOW(), lease_token=NULL, lease_until=NULL WHERE status='running' AND lease_until < NOW() AND attempts >= max_attempts")
-        .execute(pool).await?;
+    let lapsed: Vec<(Uuid, String)> = sqlx::query_as("UPDATE background_jobs SET status='failed', last_error='Worker lease expired', finished_at=lease_until, lease_token=NULL, lease_until=NULL WHERE status='running' AND lease_until < NOW() AND attempts >= max_attempts RETURNING id, kind")
+        .fetch_all(pool).await?;
+    for (job_id, kind) in lapsed {
+        tracing::error!(%job_id, kind, reason = "Worker lease expired", "Job failed permanently");
+    }
     sqlx::query_as::<_, Job>(
         r#"
         WITH candidate AS (
@@ -83,7 +88,7 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Job>, sqlx::Error> {
         UPDATE background_jobs j SET status='running', attempts=attempts+1,
             lease_until=NOW()+make_interval(secs => $2), lease_token=$1
         FROM candidate WHERE j.id=candidate.id
-        RETURNING j.id, j.owner_id, j.payload, j.attempts, j.max_attempts, j.lease_token
+        RETURNING j.id, j.owner_id, j.kind, j.payload, j.attempts, j.max_attempts, j.lease_token
     "#,
     )
     .bind(Uuid::new_v4())
@@ -107,12 +112,21 @@ pub async fn finish(
     job: &Job,
     outcome: Result<(), JobFailure>,
 ) -> Result<(), sqlx::Error> {
+    acknowledge(pool, job, outcome).await.map(|_| ())
+}
+
+/// False means the lease had passed on, so nothing was recorded.
+async fn acknowledge(
+    pool: &PgPool,
+    job: &Job,
+    outcome: Result<(), JobFailure>,
+) -> Result<bool, sqlx::Error> {
     let (error, retry_after) = match outcome {
         Ok(()) => (None, 0),
         Err(JobFailure::Safe(e)) => (Some(e), 0),
         Err(JobFailure::RetryAfter(e, secs)) => (Some(e), i32::try_from(secs).unwrap_or(i32::MAX)),
     };
-    sqlx::query(r#"UPDATE background_jobs SET
+    let updated = sqlx::query(r#"UPDATE background_jobs SET
         status=CASE WHEN $3::TEXT IS NULL THEN 'completed' WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
         last_error=$3,
         run_at=CASE WHEN $3::TEXT IS NOT NULL AND attempts < max_attempts THEN NOW()+make_interval(secs => GREATEST($4::INT, LEAST(3600, 5 * power(2, attempts))::INT)) ELSE run_at END,
@@ -121,7 +135,68 @@ pub async fn finish(
         lease_until=NULL, lease_token=NULL
         WHERE id=$1 AND lease_token=$2 AND status='running'"#)
         .bind(job.id).bind(job.lease_token).bind(error).bind(retry_after).execute(pool).await?;
-    Ok(())
+    Ok(updated.rows_affected() == 1)
+}
+
+/// The queue right now, from the table alone, so it also tells on a dead worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct Stats {
+    /// Ready to claim now, including attempts whose worker stopped renewing.
+    pub due: i64,
+    /// Waiting for a later `run_at`, including backoff.
+    pub scheduled: i64,
+    /// Held by a worker with a live lease.
+    pub running: i64,
+    /// Out of attempts in the last 24 hours, including a final attempt whose
+    /// worker died, before any worker has marked it failed.
+    pub failed_24h: i64,
+    /// How long the oldest due job has waited, 0 when none is. Alert on this: it
+    /// climbs whether the worker stopped or just can't keep up.
+    pub oldest_due_seconds: i64,
+}
+
+/// Read [`Stats`]. Scans the table, so call it on demand, not per job.
+pub async fn stats(pool: &PgPool) -> Result<Stats, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        WITH jobs AS (
+            SELECT status, run_at, finished_at, lease_until, attempts >= max_attempts AS exhausted,
+                status='running' AND lease_until < NOW() AS lapsed,
+                (status='pending' AND run_at <= NOW())
+                    OR (status='running' AND lease_until < NOW() AND attempts < max_attempts) AS due
+            FROM background_jobs
+        )
+        SELECT
+            count(*) FILTER (WHERE due) AS due,
+            count(*) FILTER (WHERE status='pending' AND NOT due) AS scheduled,
+            count(*) FILTER (WHERE status='running' AND NOT lapsed) AS running,
+            count(*) FILTER (WHERE (status='failed' AND finished_at > NOW()-INTERVAL '24 hours')
+                OR (lapsed AND exhausted AND lease_until > NOW()-INTERVAL '24 hours')) AS failed_24h,
+            COALESCE(EXTRACT(EPOCH FROM NOW()-min(run_at) FILTER (WHERE due))::BIGINT, 0) AS oldest_due_seconds
+        FROM jobs
+    "#,
+    )
+    .fetch_one(pool)
+    .await
+}
+
+#[cfg(feature = "monitor")]
+impl Stats {
+    /// The queue as `oxidt-monitor` KPIs, for the app's `MonitorSource`.
+    pub fn kpis(&self) -> Vec<oxidt_monitor::Kpi> {
+        use oxidt_monitor::Kpi;
+        vec![
+            Kpi::new("jobs_due", "Jobs due", self.due),
+            Kpi::new("jobs_scheduled", "Jobs scheduled", self.scheduled),
+            Kpi::new("jobs_running", "Jobs running", self.running),
+            Kpi::new("jobs_failed_24h", "Jobs failed (24h)", self.failed_24h),
+            Kpi::new(
+                "jobs_oldest_due_seconds",
+                "Oldest due job (s)",
+                self.oldest_due_seconds,
+            ),
+        ]
+    }
 }
 
 /// What the app plugs into the worker loop.
@@ -181,22 +256,60 @@ async fn work<H: Handler>(
         }
         match claim(handler.pool()).await {
             Ok(Some(job)) => {
-                let Some(outcome) = attempt(&handler, &job, LEASE_RENEWAL).await else {
-                    continue;
-                };
-                if let Err(JobFailure::Safe(reason) | JobFailure::RetryAfter(reason, _)) = &outcome
-                {
-                    tracing::warn!(job_id=%job.id, reason, "Job attempt failed");
-                }
-                if let Err(error) = finish(handler.pool(), &job, outcome).await {
-                    tracing::error!(%error, job_id=%job.id, "Job acknowledgement failed");
-                }
+                let span = tracing::info_span!(
+                    "job.attempt",
+                    job.id = %job.id,
+                    job.kind = %job.kind,
+                    job.attempt = job.attempts,
+                    job.outcome = tracing::field::Empty,
+                );
+                run(&handler, &job).instrument(span).await;
                 continue;
             }
             Ok(None) => {}
             Err(error) => tracing::error!(%error, "Job claim failed"),
         }
         tokio::select! { _ = stopping.changed() => break, _ = tokio::time::sleep(IDLE_POLL) => {} }
+    }
+}
+
+/// Run a claimed job and acknowledge it, reporting what happened. Fields repeat
+/// on the events because not every subscriber shows the span's.
+async fn run<H: Handler>(handler: &H, job: &Job) {
+    let started = Instant::now();
+    let span = tracing::Span::current();
+    let Some(outcome) = attempt(handler, job, LEASE_RENEWAL).await else {
+        span.record("job.outcome", "lease_lost");
+        return;
+    };
+    let (job_id, kind) = (job.id, job.kind.as_str());
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let failure = match &outcome {
+        Ok(()) => None,
+        Err(JobFailure::Safe(reason) | JobFailure::RetryAfter(reason, _)) => Some(*reason),
+    };
+    // Only what was recorded is reported as final.
+    match (acknowledge(handler.pool(), job, outcome).await, failure) {
+        (Err(error), _) => {
+            span.record("job.outcome", "unacknowledged");
+            tracing::error!(%error, %job_id, kind, "Job acknowledgement failed");
+        }
+        (Ok(false), _) => {
+            span.record("job.outcome", "lease_lost");
+            tracing::warn!(%job_id, kind, "Job lease lost, result not recorded");
+        }
+        (Ok(true), None) => {
+            span.record("job.outcome", "completed");
+            tracing::info!(%job_id, kind, duration_ms, "Job completed");
+        }
+        (Ok(true), Some(reason)) if job.attempts >= job.max_attempts => {
+            span.record("job.outcome", "failed");
+            tracing::error!(%job_id, kind, duration_ms, reason, "Job failed permanently");
+        }
+        (Ok(true), Some(reason)) => {
+            span.record("job.outcome", "retrying");
+            tracing::warn!(%job_id, kind, duration_ms, reason, "Job attempt failed");
+        }
     }
 }
 
@@ -246,6 +359,10 @@ async fn attempt<H: Handler>(
 mod tests {
     use super::*;
 
+    /// Due at once even when the database clock trails this one.
+    fn due() -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::seconds(5)
+    }
     async fn setup(pool: &PgPool) {
         sqlx::raw_sql(include_str!("../schema.sql"))
             .execute(pool)
@@ -276,7 +393,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     async fn concurrent_workers_claim_once_and_respect_schedule(pool: PgPool) {
         setup(&pool).await;
-        add(&pool, 0, Utc::now(), None).await;
+        add(&pool, 0, due(), None).await;
         let (a, b) = tokio::join!(claim(&pool), claim(&pool));
         assert_eq!(
             usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
@@ -289,7 +406,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     async fn expired_leases_retry_and_fence_old_workers(pool: PgPool) {
         setup(&pool).await;
-        add(&pool, 0, Utc::now(), None).await;
+        add(&pool, 0, due(), None).await;
         let first = claim(&pool).await.unwrap().unwrap();
         sqlx::query("UPDATE background_jobs SET lease_until=NOW()-INTERVAL '1 second'")
             .execute(&pool)
@@ -317,22 +434,14 @@ mod tests {
     async fn enqueue_rolls_back_and_dedupes(pool: PgPool) {
         setup(&pool).await;
         let mut tx = pool.begin().await.unwrap();
-        enqueue(
-            &mut tx,
-            None,
-            "test",
-            serde_json::json!({}),
-            0,
-            Utc::now(),
-            None,
-        )
-        .await
-        .unwrap();
+        enqueue(&mut tx, None, "test", serde_json::json!({}), 0, due(), None)
+            .await
+            .unwrap();
         tx.rollback().await.unwrap();
         assert!(claim(&pool).await.unwrap().is_none());
         tokio::join!(
-            add(&pool, 0, Utc::now(), Some("daily:1")),
-            add(&pool, 0, Utc::now(), Some("daily:1"))
+            add(&pool, 0, due(), Some("daily:1")),
+            add(&pool, 0, due(), Some("daily:1"))
         );
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM background_jobs")
             .fetch_one(&pool)
@@ -345,7 +454,7 @@ mod tests {
     async fn higher_priority_runs_first_among_due_jobs(pool: PgPool) {
         setup(&pool).await;
         add(&pool, 0, Utc::now() - chrono::Duration::minutes(5), None).await;
-        add(&pool, 10, Utc::now(), None).await;
+        add(&pool, 10, due(), None).await;
         add(&pool, 10, Utc::now() + chrono::Duration::hours(1), None).await;
         let first = claim(&pool).await.unwrap().unwrap();
         assert_eq!(first.payload["priority"], 10);
@@ -357,7 +466,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     async fn retry_after_delays_past_the_backoff(pool: PgPool) {
         setup(&pool).await;
-        add(&pool, 0, Utc::now(), None).await;
+        add(&pool, 0, due(), None).await;
         let job = claim(&pool).await.unwrap().unwrap();
         finish(&pool, &job, Err(JobFailure::RetryAfter("Throttled", 600)))
             .await
@@ -393,7 +502,7 @@ mod tests {
                 "tick",
                 serde_json::json!({}),
                 0,
-                Utc::now(),
+                due(),
                 Some("tick:once"),
             )
             .await
@@ -405,7 +514,7 @@ mod tests {
         setup(&pool).await;
         let mut conn = pool.acquire().await.unwrap();
         let fail = serde_json::json!({ "fail": true });
-        enqueue(&mut conn, None, "bad", fail, 0, Utc::now(), None)
+        enqueue(&mut conn, None, "bad", fail, 0, due(), None)
             .await
             .unwrap();
         drop(conn);
@@ -478,7 +587,7 @@ mod tests {
     }
     async fn add_scripted(pool: &PgPool, kind: &str, priority: i32, payload: serde_json::Value) {
         let mut conn = pool.acquire().await.unwrap();
-        enqueue(&mut conn, None, kind, payload, priority, Utc::now(), None)
+        enqueue(&mut conn, None, kind, payload, priority, due(), None)
             .await
             .unwrap();
     }
@@ -589,5 +698,74 @@ mod tests {
             .unwrap();
             assert!(outcome.is_none());
         }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn stats_count_the_queue_and_age_of_the_oldest_due_job(pool: PgPool) {
+        setup(&pool).await;
+        let empty = stats(&pool).await.unwrap();
+        assert_eq!(empty.due + empty.oldest_due_seconds, 0);
+
+        add(&pool, 0, due(), None).await; // Claimed below, stays running.
+        let running = claim(&pool).await.unwrap().unwrap();
+        add(&pool, 0, due(), None).await; // Lease lapses below.
+        let lapsed = claim(&pool).await.unwrap().unwrap();
+        sqlx::query("UPDATE background_jobs SET lease_until=NOW()-INTERVAL '1 second', run_at=NOW()-INTERVAL '10 minutes' WHERE id=$1")
+            .bind(lapsed.id).execute(&pool).await.unwrap();
+        add(&pool, 0, Utc::now() - chrono::Duration::minutes(5), None).await;
+        add(&pool, 0, Utc::now() + chrono::Duration::hours(1), None).await;
+        add(&pool, 0, Utc::now() + chrono::Duration::hours(2), None).await;
+        for age in ["1 hour", "2 days"] {
+            sqlx::query("INSERT INTO background_jobs (id,kind,status,finished_at) VALUES ($1,'old','failed',NOW()-$2::INTERVAL)")
+                .bind(Uuid::new_v4()).bind(age).execute(&pool).await.unwrap();
+        }
+
+        // Died on its final attempt, with no worker left to mark it failed.
+        sqlx::query("INSERT INTO background_jobs (id,kind,status,attempts,run_at,lease_until) VALUES ($1,'dead','running',5,NOW()-INTERVAL '1 hour',NOW()-INTERVAL '1 second')")
+            .bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO background_jobs (id,kind,status,attempts,run_at,lease_until) VALUES ($1,'long-dead','running',5,NOW()-INTERVAL '3 days',NOW()-INTERVAL '2 days')")
+            .bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+
+        let found = stats(&pool).await.unwrap();
+        assert_eq!(
+            (found.due, found.scheduled, found.running, found.failed_24h),
+            (2, 2, 1, 2)
+        );
+        assert!((598..=610).contains(&found.oldest_due_seconds), "{found:?}");
+        assert_eq!(running.kind, "test");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_lease_lost_long_ago_is_not_a_recent_failure(pool: PgPool) {
+        setup(&pool).await;
+        sqlx::query("INSERT INTO background_jobs (id,kind,status,attempts,lease_until) VALUES ($1,'long-dead','running',5,NOW()-INTERVAL '2 days')")
+            .bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+        assert!(claim(&pool).await.unwrap().is_none());
+        assert_eq!(status(&pool).await, "failed");
+        assert_eq!(stats(&pool).await.unwrap().failed_24h, 0);
+    }
+
+    #[cfg(feature = "monitor")]
+    #[test]
+    fn kpis_keep_their_board_keys() {
+        let stats = Stats {
+            due: 1,
+            scheduled: 2,
+            running: 3,
+            failed_24h: 4,
+            oldest_due_seconds: 5,
+        };
+        let found: Vec<_> = stats.kpis().iter().map(|k| (k.key, k.value)).collect();
+        assert_eq!(
+            found,
+            [
+                ("jobs_due", 1),
+                ("jobs_scheduled", 2),
+                ("jobs_running", 3),
+                ("jobs_failed_24h", 4),
+                ("jobs_oldest_due_seconds", 5)
+            ]
+        );
     }
 }
