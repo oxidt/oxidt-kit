@@ -661,7 +661,8 @@ async fn enqueue(connection: &mut PgConnection, id: Uuid) -> Result<(), sqlx::Er
         "oxidt_agent_action",
         json!({"type":"oxidt_agent_action", "request_id":id}),
         0,
-        Utc::now(),
+        // Due at once even when the database clock trails this one.
+        Utc::now() - chrono::Duration::seconds(5),
         Some(&job_key(id)),
     )
     .await
