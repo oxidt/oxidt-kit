@@ -138,6 +138,17 @@ async fn acknowledge(
     Ok(updated.rows_affected() == 1)
 }
 
+/// Delete completed jobs finished more than `older_than` ago, returning how many
+/// went. Deleting a job frees its `dedupe_key`, so `older_than` must outlast the
+/// longest key bucket or that work runs twice. Failed jobs stay, for debugging.
+pub async fn prune(pool: &PgPool, older_than: Duration) -> Result<u64, sqlx::Error> {
+    let pruned = sqlx::query("DELETE FROM background_jobs WHERE status='completed' AND finished_at < NOW()-make_interval(secs => $1)")
+        .bind(older_than.as_secs_f64())
+        .execute(pool)
+        .await?;
+    Ok(pruned.rows_affected())
+}
+
 /// The queue right now, from the table alone, so it also tells on a dead worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct Stats {
@@ -388,6 +399,36 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn prune_deletes_only_old_completed_jobs(pool: PgPool) {
+        setup(&pool).await;
+        for (key, status, age_hours) in [
+            ("old", "completed", 48),
+            ("recent", "completed", 1),
+            ("failed", "failed", 48),
+        ] {
+            add(&pool, 0, due(), Some(key)).await;
+            sqlx::query("UPDATE background_jobs SET status=$2, finished_at=NOW()-make_interval(hours => $3) WHERE dedupe_key=$1")
+                .bind(key)
+                .bind(status)
+                .bind(age_hours)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        add(&pool, 0, due(), Some("pending")).await;
+
+        let pruned = prune(&pool, Duration::from_secs(24 * 3600)).await.unwrap();
+
+        assert_eq!(pruned, 1);
+        let kept: Vec<String> =
+            sqlx::query_scalar("SELECT dedupe_key FROM background_jobs ORDER BY dedupe_key")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, ["failed", "pending", "recent"]);
     }
 
     #[sqlx::test(migrations = false)]

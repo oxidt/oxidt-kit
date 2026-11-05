@@ -6,7 +6,7 @@ backoff (capped at an hour) with an optional retry-after, and a worker pool.
 
 ```toml
 [dependencies]
-oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.2" }
+oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.3" }
 ```
 
 ## Why
@@ -55,6 +55,12 @@ worker drops the attempt if it loses the lease or goes 60 seconds without a
 confirmed renewal, so two workers don't overlap during a database outage. Panics
 count as failed attempts and the worker keeps running. Shutdown waits for a
 running attempt.
+
+## Cleaning up
+
+Nothing deletes finished jobs for you. Call `oxidt_jobs::prune(&pool, age)` from a
+daily job, with an age longer than your longest `dedupe_key` bucket: deleting a
+job frees its key. Only completed jobs go; failed ones stay for debugging.
 
 ## Watching it
 
