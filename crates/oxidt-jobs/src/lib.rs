@@ -14,6 +14,11 @@ use tokio::time::Instant;
 use tracing::Instrument;
 use uuid::Uuid;
 
+/// The `oxidt-monitor` that [`Stats::kpis`] builds on. Import it from here: a
+/// separate dependency at another tag makes `Kpi` a different type.
+#[cfg(feature = "monitor")]
+pub use oxidt_monitor;
+
 /// A running attempt gets this long unless [`Handler::attempt_timeout`] says otherwise.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const LEASE_SECS: i32 = 90;

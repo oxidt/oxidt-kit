@@ -68,11 +68,22 @@ job frees its key. Only completed jobs go; failed ones stay for debugging.
 and running, failures in the last 24 hours, and how long the oldest due job has
 waited. Alert on `oldest_due_seconds`, which climbs when the worker stops as well
 as when it falls behind. With the `monitor` feature, `Stats::kpis()` gives the
-same numbers as `oxidt-monitor` KPIs:
+same numbers as `oxidt-monitor` KPIs. The crate is re-exported, so import it from
+here instead of adding it as a dependency, which at another tag would make `Kpi`
+a different type:
 
 ```rust
+use oxidt_jobs::oxidt_monitor::{Kpi, MonitorSource};
+
 async fn kpis(&self) -> Vec<Kpi> {
-    oxidt_jobs::stats(&self.0.db.pool).await.map(|s| s.kpis()).unwrap_or_default()
+    match oxidt_jobs::stats(&self.0.db.pool).await {
+        Ok(stats) => stats.kpis(),
+        // Empty, not zeros: a zero backlog would read as healthy.
+        Err(error) => {
+            tracing::error!(%error, "Job stats failed");
+            Vec::new()
+        }
+    }
 }
 ```
 
