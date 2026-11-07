@@ -61,7 +61,7 @@ oxidt-egress = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-eg
 oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.1.1" }
 oxidt-mcp-oauth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-oauth-v0.1.0" }
 oxidt-mcp-card = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-mcp-card-v0.1.0" }
-oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.3" }
+oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.4" }
 ```
 
 `oxidt-egress` is for apps that need only egress. An app using both depends on

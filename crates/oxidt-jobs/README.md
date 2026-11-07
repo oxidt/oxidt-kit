@@ -6,7 +6,7 @@ backoff (capped at an hour) with an optional retry-after, and a worker pool.
 
 ```toml
 [dependencies]
-oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.3" }
+oxidt-jobs = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-jobs-v0.1.4" }
 ```
 
 ## Why
