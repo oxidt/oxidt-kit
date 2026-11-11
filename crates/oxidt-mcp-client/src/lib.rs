@@ -12,8 +12,8 @@
 //! - [`gate`] is the allow / ask / block rule for a connection's tools, with
 //!   the hold on a tool whose definition changed.
 //!
-//! - `oauth` (feature `oauth`) signs in to a server that wants OAuth and
-//!   keeps the resulting token fresh.
+//! - `oauth` (feature `oauth`) signs in to a server that wants OAuth, keeps
+//!   the resulting token fresh, and revokes it at the provider.
 //!
 //! No storage and no sessions: the app keeps the URL, the token and any
 //! OAuth grant encrypted, and passes them in.
@@ -40,6 +40,9 @@ pub mod oauth;
 use std::time::Duration;
 
 use oxidt_egress::{Timeouts, UrlPolicy};
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderName, HeaderValue,
+};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResponse, PaginatedRequestParams},
     service::{RoleClient, RunningService, ServiceExt},
@@ -85,13 +88,32 @@ pub enum Error {
     Tools,
     #[error("the server offers too many tools")]
     TooManyTools,
+    #[error("not a usable header name or value")]
+    Header,
+}
+
+#[derive(Clone)]
+enum Auth {
+    None,
+    Bearer(SecretString),
+    Header(HeaderName, SecretString),
+}
+
+impl Auth {
+    /// The secret this endpoint is sent, to keep it out of shown results.
+    fn secret(&self) -> Option<&SecretString> {
+        match self {
+            Self::None => None,
+            Self::Bearer(secret) | Self::Header(_, secret) => Some(secret),
+        }
+    }
 }
 
 /// A remote MCP endpoint and how to authenticate to it.
 #[derive(Clone)]
 pub struct Endpoint {
     url: Url,
-    token: Option<SecretString>,
+    auth: Auth,
 }
 
 impl Endpoint {
@@ -99,7 +121,24 @@ impl Endpoint {
     /// `token` is sent as `Authorization: Bearer …`.
     pub fn new(url: &str, token: Option<SecretString>) -> Result<Self, Error> {
         let url = oxidt_egress::check_url(url, &UrlPolicy::default()).map_err(Error::Url)?;
-        Ok(Self { url, token })
+        let auth = token.map_or(Auth::None, Auth::Bearer);
+        Ok(Self { url, auth })
+    }
+
+    /// For a server that wants its key in a header of its own, such as
+    /// `X-API-Key`. `Authorization` is refused here: use [`Endpoint::new`].
+    pub fn with_header(url: &str, name: &str, value: SecretString) -> Result<Self, Error> {
+        let url = oxidt_egress::check_url(url, &UrlPolicy::default()).map_err(Error::Url)?;
+        let name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|_| Error::Header)?;
+        // Framing and identity headers are the transport's to set.
+        let reserved = [AUTHORIZATION, HOST, CONTENT_LENGTH, CONTENT_TYPE, COOKIE];
+        if reserved.contains(&name) || HeaderValue::from_str(value.expose_secret()).is_err() {
+            return Err(Error::Header);
+        }
+        Ok(Self {
+            url,
+            auth: Auth::Header(name, value),
+        })
     }
 
     pub fn url(&self) -> &Url {
@@ -149,7 +188,7 @@ pub async fn call(
     arguments: Map<String, Value>,
 ) -> Result<Outcome, Error> {
     let session = connect(endpoint).await?;
-    let outcome = dispatch(&session, endpoint.token.as_ref(), name, arguments).await;
+    let outcome = dispatch(&session, endpoint.auth.secret(), name, arguments).await;
     close(session).await;
     Ok(outcome)
 }
@@ -167,20 +206,23 @@ async fn connect(endpoint: &Endpoint) -> Result<Session, Error> {
         total: CALL_TIMEOUT + Duration::from_secs(10),
     };
     let http = oxidt_egress::pinned_client(&pinned, timeouts).map_err(Error::Address)?;
-    open(http, endpoint.url.as_str(), endpoint.token.as_ref()).await
+    open(http, endpoint.url.as_str(), &endpoint.auth).await
 }
 
 /// The handshake over an HTTP client the caller vouches for.
-async fn open(
-    http: reqwest::Client,
-    uri: &str,
-    token: Option<&SecretString>,
-) -> Result<Session, Error> {
+async fn open(http: reqwest::Client, uri: &str, auth: &Auth) -> Result<Session, Error> {
     let mut config = StreamableHttpClientTransportConfig::with_uri(uri.to_owned())
         .max_sse_event_size(256 * 1024)
         .reinit_on_expired_session(false);
-    if let Some(token) = token {
-        config = config.auth_header(token.expose_secret().to_owned());
+    match auth {
+        Auth::None => {}
+        Auth::Bearer(token) => config = config.auth_header(token.expose_secret().to_owned()),
+        Auth::Header(name, value) => {
+            let mut value =
+                HeaderValue::from_str(value.expose_secret()).map_err(|_| Error::Header)?;
+            value.set_sensitive(true);
+            config = config.custom_headers([(name.clone(), value)].into());
+        }
     }
     let transport = StreamableHttpClientTransport::with_client(http, config);
     tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport))

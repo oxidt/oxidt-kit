@@ -64,7 +64,7 @@ fn token() -> SecretString {
 
 async fn session(url: &str) -> Session {
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
-    open(http, url, Some(&token())).await.unwrap()
+    open(http, url, &Auth::Bearer(token())).await.unwrap()
 }
 
 fn hello() -> Map<String, Value> {
@@ -159,4 +159,49 @@ fn a_long_result_is_cut_on_a_character_boundary() {
     let cut = shown(long, None);
     assert!(cut.len() <= MAX_RESULT + "\n…result truncated".len());
     assert!(cut.ends_with("…result truncated"));
+}
+
+#[tokio::test]
+async fn a_key_can_go_in_a_header_of_its_own_but_not_in_a_reserved_one() {
+    let url = "https://mcp.example.org/mcp";
+    assert!(Endpoint::with_header(url, "X-API-Key", token()).is_ok());
+    for (name, value) in [
+        ("Authorization", "test-token"),
+        ("Host", "internal"),
+        ("X Bad Name", "test-token"),
+        ("X-API-Key", "line\nbreak"),
+    ] {
+        let refused = Endpoint::with_header(url, name, SecretString::from(value));
+        assert!(matches!(refused, Err(Error::Header)), "{name}");
+    }
+
+    // The header reaches the server, and no bearer token does.
+    let router = Router::new().route(
+        "/mcp",
+        post(
+            |headers: HeaderMap, Json(request): Json<Value>| async move {
+                assert_eq!(headers.get("x-api-key").unwrap(), "test-token");
+                assert!(headers.get("authorization").is_none());
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({
+                        "protocolVersion": request["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "mock", "version": "1"}
+                    }),
+                    "tools/list" => json!({"tools": []}),
+                    _ => return StatusCode::ACCEPTED.into_response(),
+                };
+                Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))
+                    .into_response()
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let auth = Auth::Header(HeaderName::from_static("x-api-key"), token());
+    let session = open(http, &local, &auth).await.unwrap();
+    assert!(list(&session).await.unwrap().is_empty());
+    close(session).await;
 }

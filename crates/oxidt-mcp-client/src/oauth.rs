@@ -129,6 +129,16 @@ pub struct Client<'a> {
     /// Used instead of registering when the provider supports client id
     /// metadata documents.
     pub metadata_url: Option<&'a str>,
+    /// Credentials the provider handed out in advance, for one that offers
+    /// no registration. With these nothing is registered.
+    pub registered: Option<Registered<'a>>,
+}
+
+/// A client id, and its secret if the provider issued one.
+#[derive(Clone, Copy)]
+pub struct Registered<'a> {
+    pub client_id: &'a str,
+    pub client_secret: Option<&'a str>,
 }
 
 /// The document to serve at [`Client::metadata_url`].
@@ -252,10 +262,21 @@ async fn prepare(
         .get("client_id_metadata_document_supported")
         .and_then(Value::as_bool)
         == Some(true);
-    let config = match client.metadata_url {
-        Some(document) if documents => OAuthClientConfig::new(document, client.redirect_uri)
-            .with_scopes(scopes.clone())
-            .with_application_type("web"),
+    let config = match (client.registered, client.metadata_url) {
+        (Some(registered), _) => {
+            let config = OAuthClientConfig::new(registered.client_id, client.redirect_uri)
+                .with_scopes(scopes.clone())
+                .with_application_type("web");
+            match registered.client_secret {
+                Some(secret) => config.with_client_secret(secret),
+                None => config,
+            }
+        }
+        (None, Some(document)) if documents => {
+            OAuthClientConfig::new(document, client.redirect_uri)
+                .with_scopes(scopes.clone())
+                .with_application_type("web")
+        }
         _ => {
             manager
                 .register_client(client.name, client.redirect_uri, &scope_refs)
@@ -352,6 +373,87 @@ async fn refresh(grant: &mut Grant, http: Arc<dyn OAuthHttpClient>) -> Result<Se
     usable(token.map_err(|_| Error::Timeout)??)
 }
 
+/// Refresh now, even though the token has not expired. For a server that
+/// rejected a token that should still be good, which is what a revoked
+/// grant looks like: refresh once and try once more; a second rejection
+/// means the user signs in again. Save `grant` whatever this returns.
+pub async fn refresh_now(grant: &mut Grant) -> Result<SecretString, Error> {
+    force(grant, Arc::new(PublicHttp)).await
+}
+
+async fn force(grant: &mut Grant, http: Arc<dyn OAuthHttpClient>) -> Result<SecretString, Error> {
+    let (manager, store) = grant.manager(http).await?;
+    let refreshed = tokio::time::timeout(REFRESH_TIMEOUT, manager.refresh_token()).await;
+    if let Some(credentials) = store.load().await? {
+        grant.credentials = Some(credentials);
+    }
+    refreshed.map_err(|_| Error::Timeout)??;
+    usable(manager.get_access_token().await?)
+}
+
+/// Tell the provider this grant is finished (RFC 7009), so the tokens stop
+/// working there too. `Ok(false)`: the provider offers no way to.
+///
+/// A courtesy after the app deleted its own copy, never a condition for it:
+/// a provider that is down or refuses must not keep a user from
+/// disconnecting.
+pub async fn revoke(grant: &Grant) -> Result<bool, Error> {
+    let Some((address, form)) = revocation(grant) else {
+        return Ok(false);
+    };
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&form)
+        .finish();
+    let send = async {
+        let url = endpoint(&address).map_err(|_| Error::Discovery)?;
+        let client = pinned(&url).await.map_err(|_| Error::Unreachable)?;
+        let response = client
+            .post(url)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| Error::Unreachable)?;
+        // RFC 7009: 200 also for a token the provider no longer knows.
+        if response.status().is_success() {
+            Ok(true)
+        } else {
+            Err(Error::Other)
+        }
+    };
+    tokio::time::timeout(REFRESH_TIMEOUT, send)
+        .await
+        .map_err(|_| Error::Timeout)?
+}
+
+/// Where to send the revocation and what to send: the refresh token when
+/// there is one (revoking it ends the access tokens too), else the access
+/// token.
+fn revocation(grant: &Grant) -> Option<(String, Vec<(&'static str, String)>)> {
+    let address = grant
+        .metadata
+        .additional_fields
+        .get("revocation_endpoint")?
+        .as_str()?
+        .to_owned();
+    // Read through its JSON form: the token type is rmcp's own.
+    let tokens = serde_json::to_value(grant.credentials.as_ref()?.token_response.as_ref()?).ok()?;
+    let held = |name: &str| tokens[name].as_str().filter(|token| !token.is_empty());
+    let (token, hint) = match held("refresh_token") {
+        Some(refresh) => (refresh, "refresh_token"),
+        None => (held("access_token")?, "access_token"),
+    };
+    let mut form = vec![
+        ("token", token.to_owned()),
+        ("token_type_hint", hint.to_owned()),
+        ("client_id", grant.client_id.clone()),
+    ];
+    if let Some(secret) = &grant.client_secret {
+        form.push(("client_secret", secret.clone()));
+    }
+    Some((address, form))
+}
+
 fn usable(token: String) -> Result<SecretString, Error> {
     if token.is_empty() || token.len() > 16_384 || token.contains(['\r', '\n']) {
         return Err(Error::Token);
@@ -427,6 +529,7 @@ mod tests {
         name: "Test app",
         redirect_uri: "https://app.example.com/oauth/callback",
         metadata_url: Some("https://app.example.com/oauth/client.json"),
+        registered: None,
     };
 
     #[test]
@@ -672,6 +775,59 @@ mod tests {
         assert_eq!(
             Error::from(AuthError::TokenRefreshRejected("x".into())),
             Error::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forced_refresh_asks_again_although_the_token_is_still_good() {
+        let mock = MockOAuth::with(3600, false, false);
+        let (flow, params) = pending(mock.clone()).await;
+        let issuer = Some("https://auth.example.com");
+        let (token, mut grant) =
+            exchange(flow, "test-code", &params["state"], issuer, mock.clone())
+                .await
+                .unwrap();
+        assert_eq!(token.expose_secret(), "first-access-secret");
+
+        let token = force(&mut grant, mock.clone()).await.unwrap();
+        assert_eq!(token.expose_secret(), "second-access-secret");
+        assert!(
+            serde_json::to_string(&grant)
+                .unwrap()
+                .contains("rotated-refresh-secret")
+        );
+        assert_eq!(mock.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn revoking_sends_the_refresh_token_only_where_the_provider_offers_it() {
+        let mock = MockOAuth::with(3600, false, false);
+        let (flow, params) = pending(mock.clone()).await;
+        let issuer = Some("https://auth.example.com");
+        let (_, mut grant) = exchange(flow, "test-code", &params["state"], issuer, mock)
+            .await
+            .unwrap();
+
+        // This provider names no revocation endpoint: nothing to send.
+        assert!(revocation(&grant).is_none());
+        assert_eq!(revoke(&grant).await, Ok(false));
+
+        let offered = json!("https://auth.example.com/revoke");
+        grant
+            .metadata
+            .additional_fields
+            .insert("revocation_endpoint".into(), offered);
+        grant.client_secret = Some("client-secret".into());
+        let (address, form) = revocation(&grant).unwrap();
+        assert_eq!(address, "https://auth.example.com/revoke");
+        assert_eq!(
+            form,
+            [
+                ("token", "first-refresh-secret".to_owned()),
+                ("token_type_hint", "refresh_token".to_owned()),
+                ("client_id", "test-client".to_owned()),
+                ("client_secret", "client-secret".to_owned()),
+            ]
         );
     }
 }

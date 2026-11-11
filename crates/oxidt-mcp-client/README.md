@@ -90,9 +90,21 @@ guessed paths), one without PKCE `S256`, an answer from another issuer, and
 any endpoint that is not public https. `oauth::Error` is a fixed set of
 categories; provider response bodies never reach a message.
 
+## More
+
+- **A key in its own header:** `Endpoint::with_header(url, "X-API-Key", key)`
+  for a server that does not use `Authorization: Bearer`.
+- **Client credentials handed out in advance:** set `Client::registered` for a
+  provider without dynamic registration; nothing is registered then.
+- **A token rejected before it expired:** `oauth::refresh_now(&mut grant)`
+  refreshes at once. Try the call once more; a second rejection means the
+  user signs in again.
+- **Disconnecting:** `oauth::revoke(&grant)` tells the provider the grant is
+  finished (RFC 7009). Delete your own copy first and always; a provider
+  that is down or refuses must not keep a user from disconnecting.
+
 ## Not included
 
-Storage and sessions. Custom-header auth, bring-your-own OAuth client
-credentials, and telling the provider a grant was revoked.
+Storage and sessions.
 
 Extracted from smiet.
