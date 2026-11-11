@@ -172,12 +172,24 @@ pub enum Outcome {
 
 type Session = RunningService<RoleClient, ()>;
 
-/// Every tool the endpoint offers, sorted by name.
+/// Every tool the endpoint offers, sorted by name. A server that echoes the
+/// secret into a description or schema gets it redacted there as well.
 pub async fn tools(endpoint: &Endpoint) -> Result<Vec<Tool>, Error> {
     let session = connect(endpoint).await?;
     let listed = tokio::time::timeout(LIST_TIMEOUT, list(&session)).await;
     close(session).await;
-    listed.map_err(|_| Error::Tools)?
+    let mut tools = listed.map_err(|_| Error::Tools)??;
+    for tool in &mut tools {
+        scrub(tool, endpoint.auth.secret());
+    }
+    Ok(tools)
+}
+
+fn scrub(tool: &mut Tool, secret: Option<&SecretString>) {
+    let mut description = Value::String(std::mem::take(&mut tool.description));
+    redact(&mut description, secret);
+    tool.description = description.as_str().unwrap_or_default().to_owned();
+    redact(&mut tool.schema, secret);
 }
 
 /// Call `name` once. `Err` means the tool call was not sent (the handshake
@@ -278,8 +290,9 @@ async fn dispatch(
         return Outcome::Unknown;
     };
     let failed = result.is_error == Some(true);
-    let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-    let text = shown(text, token);
+    let mut result = serde_json::to_value(&result).unwrap_or_default();
+    redact(&mut result, token);
+    let text = shown(serde_json::to_string_pretty(&result).unwrap_or_default());
     if failed {
         Outcome::Failed(text)
     } else {
@@ -287,11 +300,41 @@ async fn dispatch(
     }
 }
 
-/// A result as it may be shown: without the token, and not too long.
-fn shown(mut text: String, token: Option<&SecretString>) -> String {
-    if let Some(token) = token.map(|t| t.expose_secret()).filter(|t| !t.is_empty()) {
-        text = text.replace(token, "[redacted]");
+/// Take the secret out of every string a server sent back. Done on the
+/// values, before they are written as JSON: a secret containing a quote or a
+/// backslash is escaped there and would no longer be found.
+fn redact(value: &mut Value, secret: Option<&SecretString>) {
+    let Some(secret) = secret.map(|s| s.expose_secret()).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    fn walk(value: &mut Value, secret: &str) {
+        match value {
+            Value::String(text) if text.contains(secret) => {
+                *text = text.replace(secret, "[redacted]");
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| walk(item, secret)),
+            Value::Object(fields) => {
+                // Keys too: a server can echo it anywhere.
+                let keys: Vec<String> = fields
+                    .keys()
+                    .filter(|k| k.contains(secret))
+                    .cloned()
+                    .collect();
+                for key in keys {
+                    if let Some(held) = fields.remove(&key) {
+                        fields.insert(key.replace(secret, "[redacted]"), held);
+                    }
+                }
+                fields.values_mut().for_each(|field| walk(field, secret));
+            }
+            _ => {}
+        }
     }
+    walk(value, secret);
+}
+
+/// A result as it may be shown: not too long.
+fn shown(mut text: String) -> String {
     if text.len() > MAX_RESULT {
         text.truncate(text.floor_char_boundary(MAX_RESULT));
         text.push_str("\n…result truncated");

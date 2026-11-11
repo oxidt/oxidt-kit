@@ -387,8 +387,15 @@ async fn force(grant: &mut Grant, http: Arc<dyn OAuthHttpClient>) -> Result<Secr
     if let Some(credentials) = store.load().await? {
         grant.credentials = Some(credentials);
     }
-    refreshed.map_err(|_| Error::Timeout)??;
-    usable(manager.get_access_token().await?)
+    let response = refreshed.map_err(|_| Error::Timeout)??;
+    // Taken from this response, not asked for again: asking could refresh a
+    // second time when the new token is short-lived, and that rotation would
+    // not be in `grant`.
+    let token = serde_json::to_value(&response)
+        .ok()
+        .and_then(|tokens| tokens["access_token"].as_str().map(str::to_owned))
+        .ok_or(Error::Token)?;
+    usable(token)
 }
 
 /// Tell the provider this grant is finished (RFC 7009), so the tokens stop
@@ -404,16 +411,18 @@ pub async fn revoke(grant: &Grant) -> Result<bool, Error> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(&form)
         .finish();
+    let basic = basic_secret(grant);
     let send = async {
         let url = endpoint(&address).map_err(|_| Error::Discovery)?;
         let client = pinned(&url).await.map_err(|_| Error::Unreachable)?;
-        let response = client
+        let mut request = client
             .post(url)
             .header("content-type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| Error::Unreachable)?;
+            .body(body);
+        if let Some((id, secret)) = basic {
+            request = request.basic_auth(id, Some(secret));
+        }
+        let response = request.send().await.map_err(|_| Error::Unreachable)?;
         // RFC 7009: 200 also for a token the provider no longer knows.
         if response.status().is_success() {
             Ok(true)
@@ -446,12 +455,36 @@ fn revocation(grant: &Grant) -> Option<(String, Vec<(&'static str, String)>)> {
     let mut form = vec![
         ("token", token.to_owned()),
         ("token_type_hint", hint.to_owned()),
-        ("client_id", grant.client_id.clone()),
     ];
-    if let Some(secret) = &grant.client_secret {
-        form.push(("client_secret", secret.clone()));
+    match (&grant.client_secret, basic_secret(grant)) {
+        // In the Authorization header instead.
+        (Some(_), Some(_)) => {}
+        (Some(secret), None) => {
+            form.push(("client_id", grant.client_id.clone()));
+            form.push(("client_secret", secret.clone()));
+        }
+        (None, _) => form.push(("client_id", grant.client_id.clone())),
     }
     Some((address, form))
+}
+
+/// The client id and secret for HTTP Basic, form-encoded as RFC 6749 §2.3.1
+/// asks, when that is how this provider wants a confidential client to
+/// authenticate at the revocation endpoint. Basic is the default; the form
+/// is used only where the provider lists `client_secret_post` and not Basic.
+fn basic_secret(grant: &Grant) -> Option<(String, String)> {
+    let secret = grant.client_secret.as_ref()?;
+    let listed = |field: &str| {
+        let methods = grant.metadata.additional_fields.get(field)?.as_array()?;
+        Some(methods.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+    };
+    let methods = listed("revocation_endpoint_auth_methods_supported")
+        .or_else(|| listed("token_endpoint_auth_methods_supported"))
+        .unwrap_or_default();
+    let post_only =
+        methods.contains(&"client_secret_post") && !methods.contains(&"client_secret_basic");
+    let encoded = |text: &str| url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
+    (!post_only).then(|| (encoded(&grant.client_id), encoded(secret)))
 }
 
 fn usable(token: String) -> Result<SecretString, Error> {
@@ -818,16 +851,39 @@ mod tests {
             .additional_fields
             .insert("revocation_endpoint".into(), offered);
         grant.client_secret = Some("client-secret".into());
+        // A confidential client authenticates with Basic unless the provider
+        // lists the form and not Basic.
         let (address, form) = revocation(&grant).unwrap();
         assert_eq!(address, "https://auth.example.com/revoke");
+        let token = [
+            ("token", "first-refresh-secret".to_owned()),
+            ("token_type_hint", "refresh_token".to_owned()),
+        ];
+        assert_eq!(form, token);
+        let basic = basic_secret(&grant).unwrap();
         assert_eq!(
-            form,
+            basic,
+            ("test-client".to_owned(), "client-secret".to_owned())
+        );
+
+        let methods = json!(["client_secret_post"]);
+        grant
+            .metadata
+            .additional_fields
+            .insert("token_endpoint_auth_methods_supported".into(), methods);
+        assert!(basic_secret(&grant).is_none());
+        let (_, form) = revocation(&grant).unwrap();
+        assert_eq!(
+            form[2..],
             [
-                ("token", "first-refresh-secret".to_owned()),
-                ("token_type_hint", "refresh_token".to_owned()),
                 ("client_id", "test-client".to_owned()),
                 ("client_secret", "client-secret".to_owned()),
             ]
         );
+
+        // A public client only names itself.
+        grant.client_secret = None;
+        let (_, form) = revocation(&grant).unwrap();
+        assert_eq!(form[2..], [("client_id", "test-client".to_owned())]);
     }
 }

@@ -156,7 +156,7 @@ async fn an_answer_that_is_not_a_result_is_unknown_and_not_retried() {
 #[test]
 fn a_long_result_is_cut_on_a_character_boundary() {
     let long = "ä".repeat(MAX_RESULT);
-    let cut = shown(long, None);
+    let cut = shown(long);
     assert!(cut.len() <= MAX_RESULT + "\n…result truncated".len());
     assert!(cut.ends_with("…result truncated"));
 }
@@ -204,4 +204,28 @@ async fn a_key_can_go_in_a_header_of_its_own_but_not_in_a_reserved_one() {
     let session = open(http, &local, &auth).await.unwrap();
     assert!(list(&session).await.unwrap().is_empty());
     close(session).await;
+}
+
+#[test]
+fn a_secret_with_quotes_is_redacted_wherever_a_server_echoes_it() {
+    // Written as JSON, this key is escaped and a text search would miss it.
+    let key = SecretString::from(r#"k"e\y"#);
+    let mut result = json!({
+        "content": [{"type": "text", "text": r#"Your key is k"e\y."#}],
+        r#"k"e\y"#: {"nested": [r#"again k"e\y"#]}
+    });
+    redact(&mut result, Some(&key));
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!text.contains(r#"k\"e"#), "{text}");
+    assert_eq!(text.matches("[redacted]").count(), 3);
+
+    let mut tool = Tool {
+        name: "echo".into(),
+        description: r#"Uses k"e\y"#.into(),
+        schema: json!({"default": r#"k"e\y"#}),
+        read_only: None,
+    };
+    scrub(&mut tool, Some(&key));
+    assert_eq!(tool.description, "Uses [redacted]");
+    assert_eq!(tool.schema["default"], "[redacted]");
 }
