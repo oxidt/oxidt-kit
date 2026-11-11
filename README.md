@@ -25,6 +25,7 @@ are tagged `oxidt-*-v*`.
 | [`oxidt-creem`](crates/oxidt-creem) | Creem Checkout, customer portal, subscription and signed-webhook client, plus the signed return URL |
 | [`oxidt-egress`](crates/oxidt-egress) | outbound HTTP to user-supplied URLs without becoming a proxy into the private network — https-only URL policy, address checks, DNS pinning, manual redirects |
 | [`oxidt-caldav`](crates/oxidt-caldav) | CalDAV/WebDAV for apps that write a user's own calendar — discovery, create-only or overwrite PUT, WebDAV folder check, VTODO/VEVENT bodies; every request through `oxidt-egress` |
+| [`oxidt-mcp-client`](crates/oxidt-mcp-client) | Outbound MCP for hosted apps — connect to a user's remote MCP endpoint over public HTTPS, list its tools, call one exactly once, with the allow/ask/block gate for its tools; every connection through `oxidt-egress` |
 | [`oxidt-mcp-oauth`](crates/oxidt-mcp-oauth) | the OAuth 2.1 authorization-server core for an MCP endpoint — discovery metadata, dynamic client registration, PKCE authorization code and the validation rules; storage, sessions and the consent page stay in the app |
 | [`oxidt-jobs`](crates/oxidt-jobs) | durable, at-least-once Postgres job queue — SKIP LOCKED claims, fenced leases, priority, backoff with retry-after, a worker pool over an app-supplied `Handler` |
 | [`oxidt-mcp-card`](crates/oxidt-mcp-card) | SEP-2127 discovery for an MCP endpoint — the Server Card at `<endpoint>/server-card`, the `/.well-known/ai-catalog.json` that embeds it, and the CORS/cache headers to serve both with |

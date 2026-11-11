@@ -1,0 +1,36 @@
+[package]
+name = "oxidt-mcp-client"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Outbound MCP for hosted apps — connect to a user's remote MCP endpoint over public HTTPS, list its tools, call one exactly once; every connection through oxidt-egress, plus the allow/ask/block gate for its tools"
+
+[features]
+# Sign-in to a remote server that wants OAuth instead of a pasted token.
+oauth = ["rmcp/auth", "dep:http"]
+
+[dependencies]
+http = { version = "1", optional = true }
+oxidt-egress = { path = "../oxidt-egress", features = ["client", "tokio"] }
+# rmcp's Streamable HTTP transport is generic over this client. `rustls` is
+# named here because rmcp's transport feature enables reqwest without a TLS
+# backend, and every real endpoint is https.
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+] }
+rmcp = { version = "3.9", default-features = false, features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["time"] }
+url = "2.5"
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "net"] }
