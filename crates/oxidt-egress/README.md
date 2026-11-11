@@ -27,7 +27,8 @@ and the database on the private network.
   link-local, carrier-grade NAT, benchmarking, documentation, multicast and
   reserved IPv4; IPv6 must be global unicast (no unique-local, no 6to4, no
   documentation, no `2001::/23`), and IPv4-mapped IPv6 is judged as the IPv4 it
-  carries.
+  carries. So is a NAT64 address (`64:ff9b::/96`), which is how an IPv6-only
+  network resolves every IPv4 host.
 - **The checked addresses are the ones connected to.** Checking a hostname and
   then letting the HTTP client resolve it again leaves a DNS-rebinding gap: a
   hostile resolver answers the check with a public address and the connection,

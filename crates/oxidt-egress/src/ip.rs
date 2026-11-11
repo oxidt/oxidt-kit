@@ -12,7 +12,10 @@ use std::net::IpAddr;
 /// unspecified, unique-local, link-local and multicast), plus `2001::/23`
 /// protocol assignments, `2001:db8::/32` and `3fff::/20` documentation, and
 /// `2002::/16` 6to4, which can encode a private IPv4 destination. An
-/// IPv4-mapped address is judged as the IPv4 address it carries.
+/// IPv4-mapped address is judged as the IPv4 address it carries, and so is
+/// one in the NAT64 well-known prefix `64:ff9b::/96`: on an IPv6-only
+/// network (some mobile and hotspot networks) that is how every IPv4 host
+/// resolves, and it reaches exactly the IPv4 address in its last 32 bits.
 pub fn is_forbidden(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -38,6 +41,13 @@ pub fn is_forbidden(ip: IpAddr) -> bool {
                 return is_forbidden(IpAddr::V4(v4));
             }
             let s = v6.segments();
+            // 64:ff9b::/96 only. The local-use `64:ff9b:1::/48` stays forbidden
+            // below: what it reaches is up to the local network.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = s[6].to_be_bytes();
+                let [c, d] = s[7].to_be_bytes();
+                return is_forbidden(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
             (s[0] & 0xe000) != 0x2000
                 || (s[0] == 0x2001 && (s[1] < 0x200 || s[1] == 0xdb8))
                 || s[0] == 0x2002
@@ -138,6 +148,27 @@ mod tests {
     fn ipv4_mapped_ipv6_cannot_smuggle_a_private_address() {
         let mapped = IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped());
         assert!(is_forbidden(mapped));
+    }
+
+    #[test]
+    fn a_nat64_address_is_judged_by_the_ipv4_address_inside_it() {
+        // 169.58.147.63 and 8.8.8.8 as an IPv6-only network resolves them.
+        for public in ["64:ff9b::a93a:933f", "64:ff9b::808:808"] {
+            assert!(!is_forbidden(public.parse().unwrap()), "{public}");
+        }
+        for inside in [
+            // 10.0.0.1, 127.0.0.1, 169.254.169.254, 192.168.1.1, 100.64.0.1.
+            "64:ff9b::a00:1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::c0a8:101",
+            "64:ff9b::6440:1",
+            // The local-use prefix, and a look-alike that is not the /96.
+            "64:ff9b:1::808:808",
+            "64:ff9b:0:1::808:808",
+        ] {
+            assert!(is_forbidden(inside.parse().unwrap()), "{inside}");
+        }
     }
 
     #[test]
