@@ -322,3 +322,30 @@ test('slash-command labels can be translated', async ({ page }) => {
     await expect(page.getByText('Überschrift 1')).toBeVisible();
     await expect(page.getByText('Heading 2', { exact: true })).toBeVisible();
 });
+
+test('task items tick in place and quotes hide their marker', async ({ page }) => {
+    const markdown = 'Intro\n\n- [ ] Label the folders\n- [x] Cover the books\n- plain\n\n> Always through.\n\nEnd';
+    await page.locator('oxidt-markdown-editor').evaluate((el, value) => el.editor.setValue(value, false), markdown);
+    await field(page).focus();
+    await page.keyboard.press('ControlOrMeta+End');
+    const boxes = page.locator('input.md-task');
+    await expect(boxes).toHaveCount(2);
+    await expect(boxes.nth(0)).not.toBeChecked();
+    await expect(boxes.nth(1)).toBeChecked();
+    // A task shows its checkbox only; a plain item keeps its bullet.
+    await expect(page.locator('.md-bullet')).toHaveCount(1);
+    await expect(field(page)).not.toContainText('[x]');
+    await expect(page.locator('.md-task-done')).toHaveText('Cover the books');
+    const quote = page.locator('.cm-line.md-quote');
+    await expect(quote).toHaveText('Always through.');
+    await expect(quote).toHaveCSS('border-left-width', '3px');
+
+    await boxes.nth(0).click();
+    await expect(source(page)).toHaveValue(markdown.replace('- [ ] Label', '- [x] Label'));
+    await expect(page.locator('input.md-task').nth(0)).toBeChecked();
+    await page.locator('input.md-task').nth(1).click();
+    await expect(source(page)).toHaveValue(markdown.replace('- [ ] Label', '- [x] Label').replace('- [x] Cover', '- [ ] Cover'));
+    await page.keyboard.press('ControlOrMeta+z');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(source(page)).toHaveValue(markdown);
+});

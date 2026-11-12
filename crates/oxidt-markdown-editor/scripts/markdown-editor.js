@@ -60,6 +60,27 @@ class Bullet extends WidgetType {
     ignoreEvent() { return false; }
 }
 
+// Ticking the box rewrites the marker in the Markdown, as typing would.
+class TaskBox extends WidgetType {
+    constructor(checked) { super(); this.checked = checked; }
+    eq(other) { return other.checked === this.checked; }
+    toDOM(view) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "md-task";
+        box.checked = this.checked;
+        box.disabled = view.state.readOnly;
+        box.addEventListener("mousedown", event => event.preventDefault());
+        box.addEventListener("click", event => {
+            event.preventDefault();
+            const from = view.posAtDOM(box);
+            view.dispatch({ changes: { from: from + 1, to: from + 2, insert: this.checked ? " " : "x" } });
+        });
+        return box;
+    }
+    ignoreEvent() { return true; }
+}
+
 class ImageWidget extends WidgetType {
     constructor(src, alt) { super(); this.src = src; this.alt = alt; }
     eq(other) { return other.src === this.src && other.alt === this.alt; }
@@ -182,8 +203,20 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
                 }
             } else if (name === "ListMark") {
                 if (node.parent?.parent?.name === "BulletList" && !editing(from, to)) {
-                    result.push(Decoration.replace({ widget: new Bullet() }).range(from, to));
+                    // A task's checkbox stands in for the bullet.
+                    const task = node.parent.getChild("Task");
+                    if (task) hide(from, task.from);
+                    else result.push(Decoration.replace({ widget: new Bullet() }).range(from, to));
                 }
+            } else if (name === "TaskMarker") {
+                const checked = state.sliceDoc(from + 1, from + 2) !== " ";
+                if (!editing(from, to)) result.push(Decoration.replace({ widget: new TaskBox(checked) }).range(from, to));
+                // The text after the marker, without the space between them.
+                if (checked) mark(state.sliceDoc(to, to + 1) === " " ? to + 1 : to, node.parent.to, "md-task-done");
+            } else if (name === "Blockquote") {
+                lines(from, to, "md-quote");
+            } else if (name === "QuoteMark") {
+                hide(from, state.sliceDoc(to, to + 1) === " " ? to + 1 : to);
             } else if (name === "FencedCode" || name === "CodeBlock") {
                 lines(from, to, "md-code-line");
                 if (name === "FencedCode" && diagramSource(state, node) !== null && editing(from, to)) return false;
@@ -298,6 +331,9 @@ const theme = EditorView.theme({
     ".md-diagram svg": { display: "block", maxWidth: "100%", height: "auto" },
     ".md-diagram pre": { whiteSpace: "pre-wrap", fontFamily: "ui-monospace, monospace" },
     ".md-diagram-error": { color: "var(--color-error, #b42318)" },
+    ".md-task": { width: "1em", height: "1em", margin: "0 0.5em 0 0", verticalAlign: "-0.12em", cursor: "pointer", accentColor: "var(--md-editor-accent, var(--color-primary, #146ade))" },
+    ".md-task-done": { textDecoration: "line-through", color: "color-mix(in srgb, var(--md-editor-color, var(--color-base-content, #202936)) 55%, transparent)" },
+    ".md-quote": { borderLeft: "3px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", paddingLeft: "0.9rem", color: "color-mix(in srgb, var(--md-editor-color, var(--color-base-content, #202936)) 75%, transparent)" },
     ".md-bullet": { display: "inline-block", width: "0.7em", textAlign: "center", color: "var(--md-editor-accent, var(--color-primary, #146ade))" },
     ".cm-tooltip-autocomplete": { fontFamily: "inherit", backgroundColor: "var(--md-editor-background, var(--color-base-100, #fff))", color: "var(--md-editor-color, var(--color-base-content, #202936))", border: "1px solid var(--md-editor-border, var(--color-base-300, #d1d5db))", borderRadius: "0.5rem", overflow: "hidden", boxShadow: "0 4px 16px #0002" },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "inherit", maxHeight: "min(20rem, 50vh)" },

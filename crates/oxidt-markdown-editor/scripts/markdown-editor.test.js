@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { EditorState } from "@codemirror/state";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
-import { Table } from "@lezer/markdown";
+import { Table, TaskList } from "@lezer/markdown";
 import { decorations, blocks } from "./markdown-editor.js";
 
 function render(doc, selection, focused = true, visible) {
-    const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage })] });
+    const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage, extensions: [TaskList] })] });
     const ranges = [];
     for (let cursor = decorations(state, focused, visible).iter(); cursor.value; cursor.next()) {
         ranges.push({ from: cursor.from, to: cursor.to, ...cursor.value.spec });
@@ -136,4 +136,36 @@ test("every visible range is decorated", () => {
     const doc = "**a**\n\n**b**";
     expect(render(doc, { anchor: 0 }, false, [{ from: 0, to: 5 }, { from: 7, to: 12 }]).ranges)
         .toEqual(render(doc, { anchor: 0 }, false).ranges);
+});
+
+test("task items show a checkbox instead of the bullet and the brackets", () => {
+    const doc = "- [ ] open\n- [x] done\n\ntext";
+    const { ranges, hidden } = render(doc, { anchor: doc.length });
+    const boxes = ranges.filter(range => range.widget);
+    expect(boxes.map(range => [doc.slice(range.from, range.to), range.widget.checked])).toEqual([["[ ]", false], ["[x]", true]]);
+    expect(hidden.map(range => doc.slice(range.from, range.to))).toEqual(["- ", "- "]);
+    expect(ranges.filter(range => range.class === "md-task-done").map(range => doc.slice(range.from, range.to))).toEqual(["done"]);
+});
+
+test("a task on the active line shows its Markdown", () => {
+    const doc = "- [ ] open\n- [x] done";
+    const { ranges, hidden } = render(doc, { anchor: 3 });
+    expect(ranges.filter(range => range.widget).map(range => range.from)).toEqual([13]);
+    expect(hidden.map(range => range.from)).toEqual([11]);
+});
+
+test("numbered tasks keep their number", () => {
+    const doc = "1. [ ] first\n\ntext";
+    const { ranges, hidden } = render(doc, { anchor: doc.length });
+    expect(ranges.filter(range => range.widget).map(range => doc.slice(range.from, range.to))).toEqual(["[ ]"]);
+    expect(hidden).toEqual([]);
+});
+
+test("quotes are marked per line and hide the marker until edited", () => {
+    const doc = "> first\n> second\n\ntext";
+    const { ranges, hidden } = render(doc, { anchor: doc.length });
+    expect(ranges.filter(range => range.class === "md-quote").map(range => range.from)).toEqual([0, 8]);
+    expect(hidden.map(range => doc.slice(range.from, range.to))).toEqual(["> ", "> "]);
+    expect(render(doc, { anchor: 3 }).hidden.map(range => range.from)).toEqual([8]);
+    expect(render(">tight\n\ntext", { anchor: 12 }).hidden).toEqual([{ from: 0, to: 1 }]);
 });

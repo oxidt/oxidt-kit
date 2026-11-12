@@ -1,8 +1,9 @@
 # oxidt-markdown-editor
 
 A Markdown writing field with live formatting, shared by Topcoat and Dioxus.
-Headings, emphasis, links, lists, code blocks, images, tables and diagrams render in
-place. Syntax stays visible on selected lines and reappears when the cursor
+Headings, emphasis, links, lists, task lists, quotes, code blocks, images, tables and
+diagrams render in place. A task item shows a checkbox you can tick; ticking it
+rewrites `[ ]` to `[x]` in the Markdown. Syntax stays visible on selected lines and reappears when the cursor
 returns to a line; clicking a rendered table moves the cursor into its source.
 The underlying value is always Markdown. Table cells show their source text.
 
