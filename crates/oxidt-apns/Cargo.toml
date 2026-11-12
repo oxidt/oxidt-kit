@@ -1,0 +1,24 @@
+[package]
+name = "oxidt-apns"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Apple push (APNs) with a .p8 key: silent wake-ups and visible alerts over reqwest, and which device tokens to drop"
+
+[dependencies]
+# Same backend as oxidt-auth, so an app using both builds it once.
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+# APNs accepts HTTP/2 only.
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "http2",
+    "json",
+    "rustls",
+] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+axum = "0.8.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

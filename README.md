@@ -10,6 +10,7 @@ are tagged `oxidt-*-v*`.
 
 | crate | what it is |
 |---|---|
+| [`oxidt-apns`](crates/oxidt-apns) | Apple push (APNs) with a `.p8` key — silent wake-ups, visible alerts, and which device tokens to drop |
 | [`oxidt-agent`](crates/oxidt-agent) | embedded MCP: typed capabilities, authentication, permissions, Topcoat examples, and optional durable approvals/actions over `oxidt-jobs` |
 | [`oxidt-agent-core`](crates/oxidt-agent-core) | framework-independent capability, principal and approval-policy model |
 | [`oxidt-markdown-editor`](crates/oxidt-markdown-editor) | live Markdown writing field with optional Topcoat and Dioxus components |
@@ -48,6 +49,7 @@ Depend on a tag, not a branch — the tag *is* the version:
 
 ```toml
 [dependencies]
+oxidt-apns   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-apns-v0.1.0" }
 oxidt-crypto = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-crypto-v0.1.0" }
 oxidt-smtp   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-smtp-v0.1.0" }
 oxidt-auth   = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.17.0" }

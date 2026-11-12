@@ -3163,6 +3163,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxidt-apns"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "jsonwebtoken",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oxidt-auth"
 version = "0.17.3"
 dependencies = [
@@ -3971,6 +3983,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
