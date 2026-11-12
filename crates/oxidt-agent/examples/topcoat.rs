@@ -57,7 +57,7 @@ fn add_note(store: &Store, principal: &Principal, input: AddNote) -> Result<Note
 }
 
 #[page("/")]
-async fn home() -> topcoat::Result<impl View> {
+async fn home(cx: &topcoat::context::Cx) -> topcoat::Result<impl View> {
     Ok(view! {
         <!DOCTYPE html>
         <html lang="en">

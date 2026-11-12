@@ -103,7 +103,7 @@ impl oxidt_jobs::Handler for Worker {
 }
 
 #[page("/")]
-async fn home() -> topcoat::Result<impl View> {
+async fn home(cx: &topcoat::context::Cx) -> topcoat::Result<impl View> {
     Ok(view! {
         <!DOCTYPE html>
         <html lang="en">

@@ -3,6 +3,7 @@
 use ::topcoat::{
     Result,
     asset::{Asset, asset},
+    context::Cx,
     view::{Attributes, View, component, view},
 };
 
@@ -14,7 +15,11 @@ const EDITOR_JS: Asset = asset!("../assets/markdown-editor.js");
 /// styling through `attrs`. Values are escaped by `view!`. Module scripts
 /// execute once even when several editors appear on the same page.
 #[component]
-pub async fn markdown_editor(value: &str, #[default] attrs: Attributes) -> Result<impl View> {
+pub async fn markdown_editor(
+    cx: &Cx,
+    value: &str,
+    #[default] attrs: Attributes,
+) -> Result<impl View> {
     Ok(view! {
         <oxidt-markdown-editor>
             <div data-editor-host=""></div>

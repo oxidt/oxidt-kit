@@ -95,7 +95,7 @@ mod login_page {
     };
 
     #[page("/login")]
-    async fn login() -> Result<impl View> {
+    async fn login(cx: &topcoat::context::Cx) -> Result<impl View> {
         Ok(view! { local_login_page(redirect_url: "/home") })
     }
 

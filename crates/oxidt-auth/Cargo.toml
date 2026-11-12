@@ -111,7 +111,9 @@ name = "oxidt-auth"
 # Additive.
 # 0.17.4: the terms step takes consent for the Terms of Service only; the
 # privacy policy is a notice beside it, not part of the agreement.
-version = "0.17.4"
+# 0.18.0 moves to topcoat 0.12. Breaking only in that apps must move to
+# topcoat 0.12 too; no API change.
+version = "0.18.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -167,7 +169,7 @@ ciborium = { version = "0.2", optional = true }
 
 # Web dependencies (login page component)
 dioxus = { version = "0.7.10", features = ["fullstack", "lib"], optional = true }
-topcoat = { version = "0.11.0", default-features = false, features = ["router", "view"], optional = true }
+topcoat = { version = "0.12.1", default-features = false, features = ["router", "view"], optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Request",
@@ -189,7 +191,7 @@ subtle = "2.6.1"
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 # The Topcoat test serves the auth session through a real Topcoat router.
-topcoat = { version = "0.11.0", default-features = false, features = ["router", "tower", "view"] }
+topcoat = { version = "0.12.1", default-features = false, features = ["router", "tower", "view"] }
 
 [features]
 default = []

@@ -21,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-topcoat = { version = "=0.11.0", default-features = false, features = ["tower", "view"], optional = true }
+topcoat = { version = "=0.12.1", default-features = false, features = ["tower", "view"], optional = true }
 oxidt-jobs = { path = "../oxidt-jobs", version = "0.1", optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"], optional = true }
 chrono = { workspace = true, optional = true }

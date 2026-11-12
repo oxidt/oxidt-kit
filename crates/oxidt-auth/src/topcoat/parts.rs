@@ -30,7 +30,7 @@ impl NodeViewParts for Trusted {
 }
 
 #[component]
-pub(super) async fn spinner() -> Result<impl View> {
+pub(super) async fn spinner(cx: &Cx) -> Result<impl View> {
     Ok(view! {
         <span data-spinner="" hidden=(true) class="loading loading-spinner loading-sm"></span>
     })
@@ -43,6 +43,7 @@ pub(super) const X_CIRCLE: &str =
 /// Inline outline icon (kept local to avoid an icon-crate dep in the auth crate).
 #[component]
 pub(super) async fn icon(
+    cx: &Cx,
     d: &'static str,
     class: &'static str,
     stroke_width: &'static str,
