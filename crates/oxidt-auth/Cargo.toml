@@ -109,7 +109,9 @@ name = "oxidt-auth"
 # callback page. Additive.
 # 0.17.3 adds `on_signup` to the Dioxus `LocalLoginPage`, as on `LoginPage`.
 # Additive.
-version = "0.17.3"
+# 0.17.4: the terms step takes consent for the Terms of Service only; the
+# privacy policy is a notice beside it, not part of the agreement.
+version = "0.17.4"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

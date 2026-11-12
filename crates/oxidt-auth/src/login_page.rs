@@ -640,14 +640,17 @@ pub fn LoginPage(
                                             class: "link link-primary",
                                             {crate::locale::tr("Terms of Service")}
                                         }
-                                        {crate::locale::tr(" and ")}
-                                        a {
-                                            href: "/legal/privacy",
-                                            target: "_blank",
-                                            class: "link link-primary",
-                                            {crate::locale::tr("Privacy Policy")}
-                                        }
                                     }
+                                }
+                                p { class: "text-xs text-base-content/70",
+                                    {crate::locale::tr("Our ")}
+                                    a {
+                                        href: "/legal/privacy",
+                                        target: "_blank",
+                                        class: "link link-primary",
+                                        {crate::locale::tr("Privacy Policy")}
+                                    }
+                                    {crate::locale::tr(" explains how we process your data.")}
                                 }
                                 button {
                                     class: "btn btn-primary w-full",

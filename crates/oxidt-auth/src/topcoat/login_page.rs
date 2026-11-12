@@ -302,16 +302,19 @@ pub async fn local_login_page(
                                     >
                                         (t("Terms of Service"))
                                     </a>
-                                    (t(" and "))
-                                    <a
-                                        href="/legal/privacy"
-                                        target="_blank"
-                                        class="link link-primary"
-                                    >
-                                        (t("Privacy Policy"))
-                                    </a>
                                 </span>
                             </label>
+                            <p class="text-xs text-base-content/70">
+                                (t("Our "))
+                                <a
+                                    href="/legal/privacy"
+                                    target="_blank"
+                                    class="link link-primary"
+                                >
+                                    (t("Privacy Policy"))
+                                </a>
+                                (t(" explains how we process your data."))
+                            </p>
                             <button
                                 type="button"
                                 data-action="tos-accept"
