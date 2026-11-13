@@ -303,11 +303,7 @@ async fn steps(
                 </label>
                 <p class="text-xs text-base-content/70">
                     (t("Our "))
-                    <a
-                        href="/legal/privacy"
-                        target="_blank"
-                        class="link link-primary"
-                    >
+                    <a href="/legal/privacy" target="_blank" class="link link-primary">
                         (t("Privacy Policy"))
                     </a>
                     (t(" explains how we process your data."))
