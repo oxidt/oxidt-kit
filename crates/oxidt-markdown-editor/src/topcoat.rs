@@ -14,6 +14,10 @@ const EDITOR_JS: Asset = asset!("../assets/markdown-editor.js");
 /// Forward the input's `id`, `name`, `aria-label`, validation and fallback
 /// styling through `attrs`. Values are escaped by `view!`. Module scripts
 /// execute once even when several editors appear on the same page.
+///
+/// The host hooks are opt-in attributes on the same `attrs`:
+/// `data-completion-triggers='["[["]'` and `data-wiki-links` (see the crate
+/// README for their events).
 #[component]
 pub async fn markdown_editor(
     cx: &Cx,

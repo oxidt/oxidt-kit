@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { EditorState } from "@codemirror/state";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
 import { Table, TaskList } from "@lezer/markdown";
-import { decorations, blocks } from "./markdown-editor.js";
+import { decorations, blocks, wikiLinks, wikiLinkField, setResolved } from "./markdown-editor.js";
 
 function render(doc, selection, focused = true, visible) {
     const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage, extensions: [TaskList] })] });
@@ -168,4 +168,57 @@ test("quotes are marked per line and hide the marker until edited", () => {
     expect(hidden.map(range => doc.slice(range.from, range.to))).toEqual(["> ", "> "]);
     expect(render(doc, { anchor: 3 }).hidden.map(range => range.from)).toEqual([8]);
     expect(render(">tight\n\ntext", { anchor: 12 }).hidden).toEqual([{ from: 0, to: 1 }]);
+});
+
+test("a bracketed word is not a link unless a reference defines it", () => {
+    const linked = doc => render(doc, { anchor: doc.length }, false).ranges.filter(range => range.class === "md-link").map(range => doc.slice(range.from, range.to));
+    expect(linked("A [x] word and [[Plan]].")).toEqual([]);
+    expect(linked("[a](https://a.test) and [b][]\n\n[b]: https://b.test")).toEqual(["[a](https://a.test)", "[b][]"]);
+    expect(linked("[Shortcut] and [text][Ref]\n\n[shortcut]: /s\n[ref]: /r")).toEqual(["[Shortcut]", "[text][Ref]"]);
+    // An undefined reference keeps its brackets.
+    expect(render("[x][missing]", { anchor: 0 }, false).hidden).toEqual([]);
+});
+
+function wikiState(doc, selection, answers = []) {
+    return EditorState.create({
+        doc, selection,
+        extensions: [markdown({ base: commonmarkLanguage, extensions: [TaskList] }), wikiLinkField],
+    }).update({ effects: setResolved.of(answers) }).state;
+}
+function wikiRender(state, focused) {
+    const ranges = [];
+    for (let cursor = decorations(state, focused).iter(); cursor.value; cursor.next()) {
+        ranges.push({ from: cursor.from, to: cursor.to, ...cursor.value.spec });
+    }
+    return ranges;
+}
+
+test("wiki links are found outside code, links, images and escapes", () => {
+    const doc = "[[Plan]] [[a|label]] `[[code]]` \\[[escaped]] [[x]](https://x.test) ![[[img]]](i.png) [[]]\n```\n[[fenced]]\n```\n<b title=\"[[html]]\">";
+    const state = wikiState(doc, { anchor: 0 });
+    expect(wikiLinks(state).map(link => [link.target, link.label])).toEqual([["Plan", null], ["a", "label"]]);
+});
+
+test("a resolved wiki link shows its title until the cursor enters it; an unresolved one is plain", () => {
+    const doc = "See [[p1]] and [[p2|our plan]] and [[gone]].";
+    const answers = [["p1", { title: "Plan", href: "/p/1" }], ["p2", { title: "Brief", href: "/p/2" }], ["gone", null]];
+    const shown = state => wikiRender(state, true).filter(range => range.widget).map(range => [doc.slice(range.from, range.to), range.widget.text, range.widget.href]);
+    const away = wikiState(doc, { anchor: 0 }, answers);
+    expect(shown(away)).toEqual([["[[p1]]", "Plan", "/p/1"], ["[[p2|our plan]]", "our plan", "/p/2"]]);
+    expect(wikiRender(away, true).some(range => range.class === "md-link" && doc.slice(range.from, range.to) === "[[gone]]")).toBe(false);
+    // The cursor at an edge still shows the title; inside, the source, marked as a link.
+    expect(shown(wikiState(doc, { anchor: 10 }, answers))).toHaveLength(2);
+    const inside = wikiState(doc, { anchor: 7 }, answers);
+    expect(shown(inside).map(item => item[0])).toEqual(["[[p2|our plan]]"]);
+    expect(wikiRender(inside, true).some(range => range.class === "md-link" && range.from === 4 && range.to === 10)).toBe(true);
+    // Without focus every resolved link shows its title.
+    expect(wikiRender(inside, false).filter(range => range.widget)).toHaveLength(2);
+    // No answer yet: plain text.
+    expect(wikiRender(wikiState(doc, { anchor: 0 }), false).filter(range => range.widget)).toEqual([]);
+});
+
+test("a wiki link hides formatting inside its source while shown", () => {
+    const doc = "[[**bold** title]]";
+    const ranges = wikiRender(wikiState(doc, { anchor: 0 }, [["**bold** title", { title: "T", href: "" }]]), false);
+    expect(ranges.map(range => range.widget ? "widget" : range.class ?? "hidden")).toEqual(["widget"]);
 });

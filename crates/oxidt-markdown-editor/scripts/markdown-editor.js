@@ -4,7 +4,7 @@ import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirr
 import { Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { commonmarkLanguage, markdownKeymap } from "@codemirror/lang-markdown";
 import { Strikethrough, Table, TaskList } from "@lezer/markdown";
-import { autocompletion } from "@codemirror/autocomplete";
+import { autocompletion, pickedCompletion } from "@codemirror/autocomplete";
 import { slashCommands } from "./slash-commands.js";
 import { PeleError, render as renderDiagram } from "pele";
 
@@ -48,6 +48,111 @@ class DiagramWidget extends WidgetType {
     }
     ignoreEvent() { return true; }
 }
+
+// A `[[target|label]]` the host resolved: its title (or label) as one unit. The source
+// shows when the cursor enters it (a click, or an arrow key from its edge).
+class WikiLinkWidget extends WidgetType {
+    constructor(text, href, target, hint) { super(); Object.assign(this, { text, href, target, hint }); }
+    eq(other) { return other.text === this.text && other.href === this.href && other.target === this.target && other.hint === this.hint; }
+    toDOM() {
+        const link = document.createElement("span");
+        link.className = "md-link md-wiki-link";
+        link.textContent = this.text;
+        link.dataset.target = this.target;
+        if (this.href) link.dataset.href = this.href;
+        if (this.hint) link.title = this.hint;
+        return link;
+    }
+    ignoreEvent() { return false; }
+}
+
+const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+/// The modifier that opens a link while editing: Cmd on Apple platforms, else Ctrl.
+const openHint = apple ? "⌘+click to open" : "Ctrl+click to open";
+const opens = event => (apple ? event.metaKey : event.ctrlKey);
+
+// ── Links: a bracketed word is a link only with a destination or a defined reference
+//    label, as in CommonMark. ──
+
+const normalizeLabel = text => text.trim().replace(/\s+/g, " ").toLowerCase();
+
+/// The labels defined by reference definitions (`[label]: https://…`).
+function definedLabels(state) {
+    const labels = new Set();
+    syntaxTree(state).iterate({
+        enter({ node, name }) {
+            if (name === "LinkReference") {
+                const label = node.getChild("LinkLabel");
+                if (label) labels.add(normalizeLabel(state.sliceDoc(label.from + 1, label.to - 1)));
+                return false;
+            }
+            // Definitions are blocks: inline content holds none.
+            if (name === "Paragraph" || /^(ATX|Setext)Heading/.test(name) || name === "FencedCode" || name === "CodeBlock" || name === "Table") return false;
+        },
+    });
+    return labels;
+}
+
+/// Whether a `Link` node is a link: `[text](url)`, or `[text][label]`, `[text][]` or
+/// `[text]` whose label is defined. `[x]` alone is ordinary text.
+export function isLink(state, node, labels) {
+    if (node.getChild("URL")) return true;
+    const close = node.getChildren("LinkMark").find(mark => state.sliceDoc(mark.from, mark.to) === "]");
+    if (!close) return false;
+    const text = state.sliceDoc(node.from + 1, close.from);
+    const label = node.getChild("LinkLabel");
+    const named = label ? state.sliceDoc(label.from + 1, label.to - 1) : "";
+    return labels.has(normalizeLabel(named.trim() ? named : text));
+}
+
+// ── `[[target|label]]` links, when the host opts in (`data-wiki-links`): it resolves each
+//    target to `{ title, href }` or nothing (`markdown-resolve`). ──
+
+/// Answers from the host, by target: `{ title, href }`, or `null` for one that resolves to
+/// nothing. A target without an answer yet shows as plain text.
+export const setResolved = StateEffect.define();
+export const wikiLinkField = StateField.define({
+    create: () => new Map(),
+    update(value, transaction) {
+        for (const effect of transaction.effects) {
+            if (effect.is(setResolved)) value = new Map([...value, ...effect.value]);
+        }
+        return value;
+    },
+});
+
+const literal = new Set(["InlineCode", "FencedCode", "CodeBlock", "HTMLBlock", "HTMLTag", "URL", "Image", "Autolink", "Comment", "CommentBlock", "ProcessingInstruction"]);
+
+/// The `[[target|label]]` links on the lines from `from` to `to`, outside code, HTML,
+/// images and links with a destination; `\[[` is literal.
+export function wikiLinks(state, from = 0, to = state.doc.length) {
+    const links = [];
+    const tree = syntaxTree(state);
+    for (let pos = state.doc.lineAt(from).from; pos <= to;) {
+        const line = state.doc.lineAt(pos);
+        for (const match of line.text.matchAll(/\[\[([^\[\]\n]+)\]\]/g)) {
+            const start = line.from + match.index;
+            // `\[[` is literal; `[[a]](url)` is a Markdown link whose text is `[a]`.
+            if (line.text[match.index - 1] === "\\" || line.text[match.index + match[0].length] === "(") continue;
+            let inside = false;
+            for (let node = tree.resolveInner(start + 2, 1); node; node = node.parent) {
+                if (literal.has(node.name) || (node.name === "Link" && node.getChild("URL"))) { inside = true; break; }
+            }
+            if (inside) continue;
+            const [target, ...label] = match[1].split("|");
+            if (!target.trim()) continue;
+            links.push({ from: start, to: start + match[0].length, target: target.trim(), label: label.join("|").trim() || null });
+        }
+        if (line.to >= state.doc.length) break;
+        pos = line.to + 1;
+    }
+    return links;
+}
+
+/// Whether a selection range is inside a link: the cursor strictly within it, or a
+/// selection overlapping it.
+const within = (state, from, to) => state.selection.ranges.some(range =>
+    range.empty ? from < range.head && range.head < to : range.from < to && range.to > from);
 
 class Bullet extends WidgetType {
     toDOM() {
@@ -159,6 +264,7 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
     // The syntax tree handles escapes, nested emphasis, and code correctly;
     // regexes over the document would also format Markdown inside code fences.
     const visited = new Set();
+    let labels = null;
     const opaque = new Set(["Image", "HTMLBlock", "HTMLTag", "InlineCode", "FencedCode", "CodeBlock"]);
     for (const range of ranges) syntaxTree(state).iterate({
         from: range.from, to: range.to,
@@ -191,6 +297,8 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
                 hide(node.lastChild.from, node.lastChild.to);
                 if (name === "InlineCode") return false;
             } else if (name === "Link") {
+                labels ??= definedLabels(state);
+                if (!isLink(state, node, labels)) return;
                 mark(from, to, "md-link");
                 if (!editing(from, to)) {
                     hide(from, from + 1);
@@ -227,6 +335,30 @@ export function decorations(state, focused, ranges = [{ from: 0, to: state.doc.l
             }
         },
     });
+    const resolved = state.field(wikiLinkField, false);
+    if (resolved) {
+        const covered = [];
+        const seen = new Set();
+        const editable = !state.readOnly && state.facet(EditorView.editable);
+        for (const range of ranges) for (const link of wikiLinks(state, range.from, range.to)) {
+            if (seen.has(link.from)) continue;
+            seen.add(link.from);
+            const answer = resolved.get(link.target);
+            if (!answer) continue;
+            if (focused && within(state, link.from, link.to)) {
+                mark(link.from, link.to, "md-link");
+            } else {
+                const widget = new WikiLinkWidget(link.label || answer.title, answer.href, link.target, editable ? openHint : "");
+                covered.push(Decoration.replace({ widget }).range(link.from, link.to));
+            }
+        }
+        // Formatting inside a link's source gives way to the link shown in its place.
+        if (covered.length) {
+            const kept = result.filter(item => !covered.some(link => item.from >= link.from && item.to <= link.to));
+            result.length = 0;
+            result.push(...kept, ...covered);
+        }
+    }
     for (const [pos, classes] of lineClasses) {
         result.push(Decoration.line({ class: [...classes].join(" ") }).range(pos));
     }
@@ -284,11 +416,15 @@ const blockPreview = StateField.define({
     provide: field => EditorView.decorations.from(field),
 });
 
+// A shown `[[link]]` is one unit for the cursor and for deleting.
+const shownLinks = set => set.update({ filter: (from, to, value) => value.spec.widget instanceof WikiLinkWidget });
+
 const livePreview = ViewPlugin.fromClass(class {
     constructor(view) { this.decorations = decorations(view.state, view.hasFocus, view.visibleRanges); }
     update(update) {
         if (update.docChanged || update.selectionSet || update.viewportChanged || update.focusChanged ||
-            syntaxTree(update.startState) !== syntaxTree(update.state)) {
+            syntaxTree(update.startState) !== syntaxTree(update.state) ||
+            update.state.field(wikiLinkField, false) !== update.startState.field(wikiLinkField, false)) {
             this.decorations = decorations(update.state, update.view.hasFocus, update.view.visibleRanges);
         }
     }
@@ -342,6 +478,181 @@ const theme = EditorView.theme({
     ".cm-completionDetail": { fontStyle: "normal", opacity: "0.65", marginLeft: "1rem" },
 });
 
+// ── Host hooks, all opt-in and answered through events on the textarea. ──
+
+/// Asks the host through a cancelable `type` event on `textarea`; the host claims it with
+/// `preventDefault()` and answers by calling `detail.respond(answer)`, now or later.
+/// Unclaimed, unanswered within `wait` ms, or aborted: `null`.
+function ask(textarea, type, detail, wait = 5000, signal) {
+    return new Promise(resolve => {
+        let done = false;
+        const finish = answer => { if (!done) { done = true; clearTimeout(timer); resolve(answer); } };
+        const timer = setTimeout(() => finish(null), wait);
+        signal?.addEventListener("abort", () => finish(null));
+        const event = new CustomEvent(type, { bubbles: true, cancelable: true, detail: { ...detail, respond: finish } });
+        textarea.dispatchEvent(event);
+        if (!event.defaultPrevented) finish(null);
+    });
+}
+
+/// The triggers the host completes (`data-completion-triggers`, a JSON array such as
+/// `["[["]`).
+function completionTriggers(textarea) {
+    try {
+        const triggers = JSON.parse(textarea.dataset.completionTriggers || "[]");
+        return Array.isArray(triggers) ? triggers.filter(t => typeof t === "string" && t) : [];
+    } catch { return []; }
+}
+
+/// Completions for the host's triggers, shown in the editor's own menu. Typing a trigger
+/// and up to 100 characters (no line break, none of the trigger's characters) sends a
+/// `markdown-complete` event with `{ trigger, query }`; the host answers
+/// `[{ label, detail?, insert }]`, and a pick replaces the trigger and query with `insert`
+/// as one undo step.
+export function hostCompletions(textarea) {
+    return async context => {
+        const { state, pos } = context;
+        const triggers = completionTriggers(textarea);
+        if (!triggers.length || state.readOnly || !state.facet(EditorView.editable) ||
+            state.selection.ranges.length !== 1 || !state.selection.main.empty) return null;
+        const line = state.doc.lineAt(pos);
+        const before = line.text.slice(0, pos - line.from);
+        for (const trigger of triggers) {
+            const at = before.lastIndexOf(trigger);
+            if (at < 0) continue;
+            const query = before.slice(at + trigger.length);
+            if (query.length > 100 || [...trigger].some(c => query.includes(c))) continue;
+            if (at > 0 && before[at - 1] === "\\") continue;
+            let code = false;
+            for (let node = syntaxTree(state).resolveInner(pos, -1); node; node = node.parent) {
+                if (literal.has(node.name)) { code = true; break; }
+            }
+            if (code) return null;
+            const signal = new AbortController();
+            context.addEventListener("abort", () => signal.abort());
+            const items = await ask(textarea, "markdown-complete", { trigger, query }, 5000, signal.signal);
+            if (!Array.isArray(items) || context.aborted) return null;
+            const options = items.filter(item => item && typeof item.label === "string" && typeof item.insert === "string")
+                .map(item => ({
+                    label: item.label,
+                    detail: typeof item.detail === "string" ? item.detail : undefined,
+                    apply(view, completion, from, to) {
+                        if (view.state.readOnly || !view.state.facet(EditorView.editable)) return;
+                        view.dispatch({
+                            changes: { from, to, insert: item.insert },
+                            selection: { anchor: from + item.insert.length },
+                            scrollIntoView: true,
+                            userEvent: "input.complete",
+                            annotations: [pickedCompletion.of(completion), isolateHistory.of("full")],
+                        });
+                    },
+                }));
+            // Every answer comes from the host; nothing is filtered here.
+            return { from: line.from + at, to: pos, options, filter: false };
+        }
+        return null;
+    };
+}
+
+const refreshLinks = StateEffect.define();
+
+/// Asks the host to resolve the `[[links]]` in view that it has not answered
+/// (`markdown-resolve` with `{ targets }`; the answer maps each target to
+/// `{ title, href }` or `null`), and all of them again on `refreshLinks`.
+function linkResolver(textarea) {
+    return ViewPlugin.fromClass(class {
+        constructor(view) { this.view = view; this.asked = new Set(); this.ask(); }
+        update(update) {
+            const refreshed = update.transactions.some(tr => tr.effects.some(effect => effect.is(refreshLinks)));
+            if (refreshed) this.asked.clear();
+            if (refreshed || update.docChanged || update.viewportChanged) this.ask();
+        }
+        ask() {
+            const { state } = this.view;
+            const targets = new Set();
+            for (const range of this.view.visibleRanges) {
+                for (const link of wikiLinks(state, range.from, range.to)) {
+                    if (!this.asked.has(link.target)) targets.add(link.target);
+                }
+            }
+            if (!targets.size) return;
+            for (const target of targets) this.asked.add(target);
+            // Not during an update: an answer given at once dispatches.
+            setTimeout(async () => {
+                const answer = await ask(textarea, "markdown-resolve", { targets: [...targets] }, 10000);
+                if (!answer || typeof answer !== "object" || this.destroyed) {
+                    for (const target of targets) this.asked.delete(target);
+                    return;
+                }
+                const entries = [...targets].map(target => {
+                    const found = answer[target];
+                    return [target, found && typeof found.title === "string"
+                        ? { title: found.title, href: typeof found.href === "string" ? found.href : "" } : null];
+                });
+                this.view.dispatch({ effects: setResolved.of(entries) });
+            });
+        }
+        destroy() { this.destroyed = true; }
+    });
+}
+
+/// The link at `pos`: a `[[target]]` (with its answer) or a Markdown link with a destination.
+function linkAt(state, pos) {
+    const wiki = wikiLinks(state, pos, pos).find(link => link.from <= pos && pos <= link.to);
+    if (wiki) {
+        const answer = state.field(wikiLinkField, false)?.get(wiki.target);
+        return { kind: "wiki", target: wiki.target, href: answer?.href || null };
+    }
+    for (let node = syntaxTree(state).resolveInner(pos, 0); node; node = node.parent) {
+        if (node.name === "Image") return null;
+        if (node.name === "Link") {
+            const url = node.getChild("URL");
+            return url ? { kind: "link", target: null, href: state.sliceDoc(url.from, url.to) } : null;
+        }
+    }
+    return null;
+}
+
+/// A click on a link: read-only, a plain click; editing, Cmd/Ctrl+click (shown as the
+/// shown link's tooltip). Sends `markdown-link` with `{ kind: "wiki" | "link", target, href }`;
+/// when the host claims it (`preventDefault()`), the click does nothing else. A plain click
+/// on a shown `[[link]]` while editing moves the cursor into it, which shows its source.
+function activateLink(textarea, event, view) {
+    if (event.button !== 0) return false;
+    const locked = view.state.readOnly || !view.state.facet(EditorView.editable);
+    const shown = event.target.closest?.(".md-wiki-link");
+    if (shown && !locked && !opens(event)) {
+        event.preventDefault();
+        view.dispatch({ selection: { anchor: view.posAtDOM(shown) + 2 } });
+        view.focus();
+        return true;
+    }
+    if (!locked && !opens(event)) return false;
+    let link;
+    if (shown) link = { kind: "wiki", target: shown.dataset.target, href: shown.dataset.href || null };
+    else {
+        const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+        link = pos == null ? null : linkAt(view.state, pos);
+    }
+    if (!link) return false;
+    const claimed = !textarea.dispatchEvent(new CustomEvent("markdown-link", { bubbles: true, cancelable: true, detail: link }));
+    if (claimed) event.preventDefault();
+    return claimed;
+}
+
+/// An arrow key at the edge of a shown `[[link]]` moves into it, which shows its source.
+const enterLink = forward => view => {
+    const { state } = view;
+    const range = state.selection.main;
+    if (!range.empty || !state.field(wikiLinkField, false)) return false;
+    const link = wikiLinks(state, range.head, range.head).find(link =>
+        (forward ? link.from === range.head : link.to === range.head) && state.field(wikiLinkField).get(link.target));
+    if (!link) return false;
+    view.dispatch({ selection: { anchor: forward ? link.from + 1 : link.to - 1 }, scrollIntoView: true });
+    return true;
+};
+const wikiKeys = [{ key: "ArrowRight", run: enterLink(true) }, { key: "ArrowLeft", run: enterLink(false) }];
+
 export function mountEditor(textarea, host) {
     const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
     const controls = new Compartment();
@@ -381,7 +692,12 @@ export function mountEditor(textarea, host) {
             new LanguageSupport(new Language(commonmarkLanguage.data, commonmarkLanguage.parser.configure([Strikethrough, Table, TaskList]), [], "markdown")),
             Prec.high(keymap.of(markdownKeymap)),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(controlled()),
-            autocompletion({ override: [slashCommands(commandLabels(textarea))], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
+            autocompletion({ override: [slashCommands(commandLabels(textarea)), hostCompletions(textarea)], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
+            textarea.hasAttribute("data-wiki-links") ? [
+                wikiLinkField, linkResolver(textarea), Prec.high(keymap.of(wikiKeys)),
+                EditorView.atomicRanges.of(view => shownLinks(view.plugin(livePreview)?.decorations ?? Decoration.none)),
+            ] : [],
+            EditorView.domEventHandlers({ mousedown: (event, view) => activateLink(textarea, event, view) }),
             EditorView.lineWrapping, theme, livePreview, focusState, blockPreview,
             EditorView.focusChangeEffect.of((_, focusing) => setFocus.of(focusing)),
             EditorState.transactionFilter.of(transaction => {
@@ -436,6 +752,15 @@ export function mountEditor(textarea, host) {
             view.focus();
             return view.state.doc !== before;
         },
+        replace(from, to, text) {
+            if (locked() || from < 0 || to < from || to > view.state.doc.length) return false;
+            const length = view.state.doc.length - (to - from) + text.length;
+            if (textarea.maxLength >= 0 && length > textarea.maxLength && length > view.state.doc.length) return false;
+            view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, scrollIntoView: true, userEvent: "input", annotations: isolateHistory.of("full") });
+            view.focus();
+            return true;
+        },
+        refreshLinks() { view.dispatch({ effects: refreshLinks.of(null) }); },
         positionAt(event) { return view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head; },
         show(visible) { host.hidden = !visible; if (visible) view.focus(); },
         destroy() {

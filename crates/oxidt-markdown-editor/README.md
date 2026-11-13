@@ -22,6 +22,84 @@ Commands: `/heading-1`, `/heading-2`, `/heading-3`, `/bullet-list`,
 inserts a fenced block with the cursor inside it. The diagram command inserts
 an editable Mermaid flowchart.
 
+## Links
+
+A link is `[text](url)`, or a reference (`[text][label]`, `[text][]`, `[text]`)
+whose label a definition (`[label]: url`) gives. A bracketed word without
+either, such as `[x]` or `[[Plan]]`, is ordinary text and is not styled as a
+link (before 0.7.0 it was).
+
+While editing, Cmd+click (Ctrl+click elsewhere) on a link sends a
+`markdown-link` event; in a read-only field a plain click does (see
+[Host hooks](#host-hooks)). Without a listener the click behaves as before.
+
+## Host hooks
+
+Three opt-in hooks let the host complete, resolve and open links. They talk
+through events dispatched on the textarea (they bubble). The host claims an
+event with `event.preventDefault()` and answers by calling
+`event.detail.respond(answer)`, at once or later (after a request to its
+server). An unclaimed event, or one without an answer within a few seconds,
+changes nothing.
+
+### Completions: `data-completion-triggers`
+
+```html
+<textarea data-completion-triggers='["[["]'></textarea>
+```
+
+Typing a trigger and up to 100 characters (no line break and none of the
+trigger's characters, outside code and HTML) sends `markdown-complete` with
+`{ trigger, query }`. Answer with `[{ label, detail?, insert }]`; the editor
+shows them in its own menu beside the slash commands, with its keyboard
+handling (Up/Down, Enter, Escape) and at the cursor. A pick replaces the
+trigger and query with `insert` as one undo step, cursor after it. The host
+filters; the editor shows the answer as given.
+
+```js
+textarea.addEventListener("markdown-complete", event => {
+    event.preventDefault();
+    fetch(`/links?q=${encodeURIComponent(event.detail.query)}`)
+        .then(r => r.json())
+        .then(({ items }) => event.detail.respond(items.map(item => ({
+            label: item.title, detail: item.place, insert: `[[${item.id}]]`,
+        }))))
+        .catch(() => event.detail.respond([]));
+});
+```
+
+### `[[links]]`: `data-wiki-links`
+
+With `data-wiki-links`, `[[target]]` and `[[target|label]]` (outside code,
+HTML, images and Markdown links; `\[[` is literal) are resolved by the host.
+For the targets in view it has not answered, the editor sends
+`markdown-resolve` with `{ targets }`; answer with an object mapping each
+target to `{ title, href }`, or `null` when it resolves to nothing.
+
+- A resolved link shows its label, or else its title, as one unit, styled as a
+  link, with an "⌘+click to open" (or Ctrl) tooltip while editing. The cursor
+  and Backspace treat it as one unit; a click on it, or an arrow key from its
+  edge, moves the cursor into it and shows the source.
+- An unresolved link, or one without an answer yet, is plain text.
+- `editor.refreshLinks()` asks again for every link in view, for a rename or a
+  restore; the shown titles stay until the new answer arrives.
+
+### Opening links: `markdown-link`
+
+Cmd/Ctrl+click while editing, or a plain click when read-only, on a shown
+`[[link]]`, its source, or a Markdown link with a destination sends
+`markdown-link` with `{ kind: "wiki" | "link", target, href }` (`target` is
+the `[[…]]` target; `href` is the host's answer or the link's destination).
+Call `preventDefault()` to claim it: the click then does nothing else.
+
+```js
+textarea.addEventListener("markdown-link", event => {
+    if (!event.detail.href) return;
+    event.preventDefault();
+    location.assign(event.detail.href);
+});
+```
+
 ## Labels
 
 The slash menu shows an English label beside each command. Translate them with
@@ -116,12 +194,14 @@ const editor = textarea.closest("oxidt-markdown-editor").editor;
 editor.setValue(markdown);            // emits input if changed
 editor.setValue(markdown, false);     // controlled update, no input echo
 editor.insert(offset, imageMarkdown); // its own undo step; false if rejected
+editor.replace(from, to, text);       // one undo step, cursor after it; false if rejected
+editor.refreshLinks();                // re-resolve [[links]] in view (data-wiki-links)
 editor.show(false);                  // hide for a server-rendered preview
 editor.show(true);                   // show and focus
 ```
 
 The API is absent until the module loads; retain the textarea fallback.
-`insert` returns `false` when the field is disabled, readonly, or the text
+`insert` and `replace` return `false` when the field is disabled, readonly, or the text
 would exceed `maxlength`. `positionAt(event)` maps a drop's client coordinates
 to a document offset. Native `required`, `maxlength`, `disabled` (including a
 disabled fieldset), `readonly`, `placeholder`, labels and form reset are

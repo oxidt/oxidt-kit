@@ -349,3 +349,113 @@ test('task items tick in place and quotes hide their marker', async ({ page }) =
     await page.keyboard.press('ControlOrMeta+z');
     await expect(source(page)).toHaveValue(markdown);
 });
+
+test.describe('host hooks', () => {
+    test.beforeEach(async ({ page }) => {
+        await page.goto('/?wiki');
+        await expect(field(page)).toBeVisible();
+    });
+
+    test('resolved [[links]] show their title, unresolved ones stay plain text', async ({ page }) => {
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Plan']);
+        await expect(page.locator('.md-wiki-link')).toHaveAttribute('title', /click to open/);
+        await expect(field(page)).toContainText('[[gone]]');
+        await expect(page.locator('.md-link')).toHaveCount(1);
+        expect(await page.evaluate(() => window.asked)).toEqual([['p1', 'gone']]);
+    });
+
+    test('a click or an arrow key from its edge shows the source; leaving shows the title', async ({ page }) => {
+        await page.locator('.md-wiki-link').click();
+        await expect(page.locator('.md-wiki-link')).toHaveCount(0);
+        await expect(field(page)).toContainText('See [[p1]] and');
+        await page.keyboard.press('End');
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Plan']);
+        await page.keyboard.press('Home');
+        for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowRight');
+        await expect(page.locator('.md-wiki-link')).toHaveCount(1);
+        await page.keyboard.press('ArrowRight');
+        await expect(page.locator('.md-wiki-link')).toHaveCount(0);
+    });
+
+    test('Backspace after a shown link deletes it as one unit', async ({ page }) => {
+        await write(page, 'A [[p1]]');
+        await page.keyboard.press('End');
+        await page.keyboard.insertText(' ');
+        await page.keyboard.press('Backspace');
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Plan']);
+        await page.keyboard.press('Backspace');
+        await expect(source(page)).toHaveValue('A ');
+    });
+
+    test('[[ completes from the host by keyboard and by mouse, one undo step each', async ({ page }) => {
+        await write(page, 'Read [[br');
+        await expect(page.getByRole('option')).toHaveText(['BriefPage']);
+        await page.keyboard.press('Enter');
+        await expect(source(page)).toHaveValue('Read [[p2]]');
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Brief']);
+        await page.keyboard.press('ControlOrMeta+z');
+        await expect(source(page)).toHaveValue('Read [[br');
+        await page.keyboard.insertText('X');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.insertText('pl');
+        await page.getByRole('option', { name: /Plan/ }).click();
+        await expect(source(page)).toHaveValue('Read [[p1]]');
+    });
+
+    test('no completion inside code', async ({ page }) => {
+        await write(page, '```\n[[pl');
+        await page.waitForTimeout(200);
+        await expect(page.getByRole('option')).toHaveCount(0);
+    });
+
+    test('Cmd/Ctrl+click opens a link while editing; a plain click edits', async ({ page }) => {
+        await write(page, 'Go [[p1]] or [site](https://example.com)\n\nend');
+        await page.keyboard.press('ControlOrMeta+End');
+        await page.locator('.md-wiki-link').click({ modifiers: ['ControlOrMeta'] });
+        await page.getByText('site').click({ modifiers: ['ControlOrMeta'] });
+        expect(await page.evaluate(() => window.links)).toEqual([
+            { kind: 'wiki', target: 'p1', href: '/p/p1' },
+            { kind: 'link', target: null, href: 'https://example.com' },
+        ]);
+    });
+
+    test('refreshLinks asks again and the title follows', async ({ page }) => {
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Plan']);
+        await page.evaluate(() => { window.titles.p1 = 'Plan v2'; window.titles.gone = 'Back'; });
+        await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.refreshLinks());
+        await expect(page.locator('.md-wiki-link')).toHaveText(['Plan v2', 'Back']);
+    });
+
+    test('replace swaps a range in one undo step with the cursor after it', async ({ page }) => {
+        await write(page, 'Hello world');
+        expect(await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.replace(6, 11, 'there'))).toBe(true);
+        await page.keyboard.insertText('!');
+        await expect(source(page)).toHaveValue('Hello there!');
+        await page.keyboard.press('ControlOrMeta+z');
+        await page.keyboard.press('ControlOrMeta+z');
+        await expect(source(page)).toHaveValue('Hello world');
+    });
+});
+
+test('read-only: a plain click opens a link', async ({ page }) => {
+    await page.goto('/?wiki&readonly');
+    await page.locator('.md-wiki-link').click();
+    expect(await page.evaluate(() => window.links)).toEqual([{ kind: 'wiki', target: 'p1', href: '/p/p1' }]);
+    await expect(page.locator('.md-wiki-link')).not.toHaveAttribute('title');
+});
+
+test('a bracketed word is plain text, not a link', async ({ page }) => {
+    await write(page, 'A [word] and [[Plan]]\n\nend');
+    await page.keyboard.press('ControlOrMeta+End');
+    await expect(page.locator('.md-link')).toHaveCount(0);
+    await expect(field(page)).toContainText('A [word] and [[Plan]]');
+});
+
+test('without the attributes, [[ neither completes nor resolves', async ({ page }) => {
+    await write(page, 'See [[pl');
+    await page.waitForTimeout(200);
+    await expect(page.getByRole('option')).toHaveCount(0);
+    await expect(page.locator('.md-wiki-link')).toHaveCount(0);
+});
