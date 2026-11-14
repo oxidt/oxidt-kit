@@ -479,7 +479,8 @@ test.describe('applyRemote', () => {
         await expect(source(page)).toHaveValue('Mine!\n\nTheir edit');
         await page.keyboard.press('ControlOrMeta+z');
         await expect(source(page)).toHaveValue('Mine\n\nTheir edit');
-        await page.keyboard.press('ControlOrMeta+Shift+z');
+        // Redo is Mod-y off the Mac; Ctrl+Shift+Z is not bound on every platform.
+        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+y');
         await expect(source(page)).toHaveValue('Mine!\n\nTheir edit');
     });
 
