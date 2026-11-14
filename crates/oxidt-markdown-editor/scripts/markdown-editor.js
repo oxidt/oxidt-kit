@@ -1,4 +1,4 @@
-import { Compartment, EditorState, Prec, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Prec, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, isolateHistory } from "@codemirror/commands";
 import { Language, LanguageSupport, syntaxTree } from "@codemirror/language";
@@ -653,6 +653,34 @@ const enterLink = forward => view => {
 };
 const wikiKeys = [{ key: "ArrowRight", run: enterLink(true) }, { key: "ArrowLeft", run: enterLink(false) }];
 
+/// Someone else's edit as a transaction: `changes` are `{ from, to, text }` in the current
+/// document, none overlapping another. Kept out of the undo history, which is mapped
+/// through it instead. A selection end before a change stays, one after it moves with
+/// the text, and one strictly inside a replaced range goes to the end of its new text.
+/// `null` when a change is not valid.
+export function remoteChange(state, changes) {
+    const list = [...changes].sort((a, b) => a?.from - b?.from);
+    let end = 0;
+    for (const change of list) {
+        const { from, to, text } = change ?? {};
+        if (!Number.isInteger(from) || !Number.isInteger(to) || typeof text !== "string" ||
+            from < end || to < from || to > state.doc.length) return null;
+        end = to;
+    }
+    const set = state.changes(list.map(({ from, to, text }) => ({ from, to, insert: text })));
+    const map = pos => {
+        let inside = false;
+        set.iterChangedRanges((from, to) => { if (from < pos && pos < to) inside = true; });
+        return set.mapPos(pos, inside ? 1 : -1);
+    };
+    const { ranges, mainIndex } = state.selection;
+    return {
+        changes: set,
+        selection: EditorSelection.create(ranges.map(range => EditorSelection.range(map(range.anchor), map(range.head))), mainIndex),
+        annotations: [Transaction.addToHistory.of(false), Transaction.remote.of(true)],
+    };
+}
+
 export function mountEditor(textarea, host) {
     const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
     const controls = new Compartment();
@@ -758,6 +786,25 @@ export function mountEditor(textarea, host) {
             if (textarea.maxLength >= 0 && length > textarea.maxLength && length > view.state.doc.length) return false;
             view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, scrollIntoView: true, userEvent: "input", annotations: isolateHistory.of("full") });
             view.focus();
+            return true;
+        },
+        // Someone else's edit: no undo step, no input event, no focus. During an IME
+        // composition nothing changes and the answer is false; retry after compositionend.
+        applyRemote(from, to, text) {
+            if (view.composing || view.compositionStarted) return false;
+            const spec = remoteChange(view.state, Array.isArray(from) ? from : [{ from, to, text }]);
+            if (!spec) return false;
+            // The caret line stays in view if it was; otherwise nothing scrolls.
+            let shown = false;
+            if (view.hasFocus) {
+                const caret = view.coordsAtPos(view.state.selection.main.head);
+                const box = view.scrollDOM.getBoundingClientRect();
+                shown = !!caret && caret.bottom > Math.max(box.top, 0) && caret.top < Math.min(box.bottom, window.innerHeight);
+            }
+            notifying = false;
+            try {
+                view.dispatch({ ...spec, scrollIntoView: shown });
+            } finally { notifying = true; }
             return true;
         },
         refreshLinks() { view.dispatch({ effects: refreshLinks.of(null) }); },

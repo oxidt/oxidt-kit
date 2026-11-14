@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "oxidt-markdown-editor"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "dioxus",
  "dioxus-ssr",

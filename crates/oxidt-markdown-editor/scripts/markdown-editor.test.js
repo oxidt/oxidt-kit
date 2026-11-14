@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { EditorState } from "@codemirror/state";
 import { commonmarkLanguage, markdown } from "@codemirror/lang-markdown";
 import { Table, TaskList } from "@lezer/markdown";
-import { decorations, blocks, wikiLinks, wikiLinkField, setResolved } from "./markdown-editor.js";
+import { history, isolateHistory, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
+import { decorations, blocks, wikiLinks, wikiLinkField, setResolved, remoteChange } from "./markdown-editor.js";
 
 function render(doc, selection, focused = true, visible) {
     const state = EditorState.create({ doc, selection, extensions: [markdown({ base: commonmarkLanguage, extensions: [TaskList] })] });
@@ -221,4 +222,81 @@ test("a wiki link hides formatting inside its source while shown", () => {
     const doc = "[[**bold** title]]";
     const ranges = wikiRender(wikiState(doc, { anchor: 0 }, [["**bold** title", { title: "T", href: "" }]]), false);
     expect(ranges.map(range => range.widget ? "widget" : range.class ?? "hidden")).toEqual(["widget"]);
+});
+
+// ── Remote changes (`editor.applyRemote`) ──
+
+function editing(doc, anchor = doc.length) {
+    let state = EditorState.create({ doc, selection: { anchor }, extensions: [history()] });
+    const run = (command) => command({ state, dispatch: tr => { state = tr.state; } });
+    return {
+        get state() { return state; },
+        // The writer's own edit, one undo step each.
+        type(from, to, insert) {
+            state = state.update({ changes: { from, to, insert }, selection: { anchor: from + insert.length }, userEvent: "input.type" }).state;
+            state = state.update({ annotations: isolateHistory.of("full") }).state;
+        },
+        remote(changes) { state = state.update(remoteChange(state, changes)).state; },
+        undo: () => run(undo),
+        redo: () => run(redo),
+        text: () => state.doc.toString(),
+        caret: () => state.selection.main.head,
+    };
+}
+
+test("a remote change is no undo step: undo takes back only the writer's own edit, redo restores it", () => {
+    const doc = editing("Mine.\n\nTheirs.");
+    doc.type(5, 5, " More");
+    expect(undoDepth(doc.state)).toBe(1);
+    doc.remote([{ from: 12, to: 18, text: "Their edit" }]);
+    expect(doc.text()).toBe("Mine. More\n\nTheir edit.");
+    expect(undoDepth(doc.state)).toBe(1);
+    doc.undo();
+    expect(doc.text()).toBe("Mine.\n\nTheir edit.");
+    doc.undo();
+    expect(doc.text()).toBe("Mine.\n\nTheir edit.");
+    doc.redo();
+    expect(doc.text()).toBe("Mine. More\n\nTheir edit.");
+    expect(redoDepth(doc.state)).toBe(0);
+});
+
+test("history maps through a remote change before the writer's earlier edit", () => {
+    const doc = editing("Intro\n\nBody");
+    doc.type(11, 11, " text");
+    doc.remote([{ from: 0, to: 5, text: "A longer intro" }]);
+    expect(doc.text()).toBe("A longer intro\n\nBody text");
+    doc.undo();
+    expect(doc.text()).toBe("A longer intro\n\nBody");
+    doc.redo();
+    expect(doc.text()).toBe("A longer intro\n\nBody text");
+});
+
+test("the caret stays before a remote change, moves with text after it, and leaves a replaced range at its end", () => {
+    const at = (anchor, changes) => { const doc = editing("0123456789", anchor); doc.remote(changes); return doc.caret(); };
+    const change = [{ from: 4, to: 6, text: "abcd" }];
+    expect(at(2, change)).toBe(2);
+    expect(at(4, change)).toBe(4);
+    expect(at(8, change)).toBe(10);
+    expect(at(6, change)).toBe(8);
+    expect(at(5, change)).toBe(8);
+    // An insertion at the caret goes after it.
+    expect(at(4, [{ from: 4, to: 4, text: "xy" }])).toBe(4);
+});
+
+test("several remote changes apply in one transaction, against the current text", () => {
+    const doc = editing("one two three", 7);
+    doc.remote([{ from: 8, to: 13, text: "3" }, { from: 0, to: 3, text: "1" }]);
+    expect(doc.text()).toBe("1 two 3");
+    expect(doc.caret()).toBe(5);
+    expect(undoDepth(doc.state)).toBe(0);
+});
+
+test("invalid remote changes are refused", () => {
+    const { state } = editing("abc");
+    expect(remoteChange(state, [{ from: 2, to: 4, text: "" }])).toBe(null);
+    expect(remoteChange(state, [{ from: 2, to: 1, text: "" }])).toBe(null);
+    expect(remoteChange(state, [{ from: 0, to: 2, text: "" }, { from: 1, to: 3, text: "" }])).toBe(null);
+    expect(remoteChange(state, [{ from: 0, to: 1, text: 5 }])).toBe(null);
+    expect(remoteChange(state, [{ from: 0.5, to: 1, text: "" }])).toBe(null);
+    expect(remoteChange(state, [null])).toBe(null);
 });

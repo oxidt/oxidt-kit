@@ -1,12 +1,12 @@
 [package]
 name = "oxidt-markdown-editor"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/oxidt/oxidt-kit"
 description = "Live Markdown writing field with Topcoat and Dioxus components"
 readme = "README.md"
-include = ["src/**", "assets/**", "README.md", "LICENSE", "Cargo.toml"]
+include = ["src/**", "assets/**", "README.md", "CHANGELOG.md", "LICENSE", "Cargo.toml"]
 
 [features]
 default = []

@@ -459,3 +459,89 @@ test('without the attributes, [[ neither completes nor resolves', async ({ page 
     await expect(page.getByRole('option')).toHaveCount(0);
     await expect(page.locator('.md-wiki-link')).toHaveCount(0);
 });
+
+test.describe('applyRemote', () => {
+    const remote = (page, ...args) => page.locator('oxidt-markdown-editor').evaluate((el, args) => el.editor.applyRemote(...args), args);
+    // CodeMirror scrolls in its next measure, after a frame.
+    const scrollY = page => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(window.scrollY)))));
+
+    test('applies someone else\'s edit with no undo step, no input event, and the caret kept', async ({ page }) => {
+        await write(page, 'Mine\n\nTheirs');
+        await page.keyboard.press('ControlOrMeta+Home');
+        await page.keyboard.press('End');
+        const inputs = await page.evaluate(() => window.inputs);
+        expect(await remote(page, 6, 12, 'Their edit')).toBe(true);
+        await expect(source(page)).toHaveValue('Mine\n\nTheir edit');
+        expect(await page.evaluate(() => window.inputs)).toBe(inputs);
+        expect(await source(page).evaluate(el => [el.selectionStart, el.selectionEnd])).toEqual([4, 4]);
+        await expect(field(page)).toBeFocused();
+        await page.keyboard.insertText('!');
+        await expect(source(page)).toHaveValue('Mine!\n\nTheir edit');
+        await page.keyboard.press('ControlOrMeta+z');
+        await expect(source(page)).toHaveValue('Mine\n\nTheir edit');
+        await page.keyboard.press('ControlOrMeta+Shift+z');
+        await expect(source(page)).toHaveValue('Mine!\n\nTheir edit');
+    });
+
+    test('a list of changes applies at once; an invalid one changes nothing', async ({ page }) => {
+        expect(await remote(page, [{ from: 12, to: 20, text: 'Body' }, { from: 0, to: 10, text: '# Title' }])).toBe(true);
+        await expect(source(page)).toHaveValue('# Title\n\nBody');
+        expect(await remote(page, 2, 99, 'x')).toBe(false);
+        await expect(source(page)).toHaveValue('# Title\n\nBody');
+    });
+
+    test('works without focus and does not take it', async ({ page }) => {
+        const reset = page.getByRole('button', { name: 'Reset', exact: true });
+        await reset.focus();
+        expect(await remote(page, 0, 10, '# Theirs')).toBe(true);
+        await expect(source(page)).toHaveValue('# Theirs\n\n**Text**');
+        await expect(reset).toBeFocused();
+        await expect(page.locator('.md-h1')).toHaveText('Theirs');
+        expect(await page.evaluate(() => window.inputs)).toBe(0);
+        await field(page).focus();
+        await page.keyboard.press('ControlOrMeta+z');
+        await expect(source(page)).toHaveValue('# Theirs\n\n**Text**');
+    });
+
+    test('scrolls only to keep a caret that was in view', async ({ page }) => {
+        const lines = Array.from({ length: 80 }, (_, i) => 'Line ' + i).join('\n');
+        await write(page, lines);
+        await page.keyboard.press('ControlOrMeta+Home');
+        await page.evaluate(() => window.scrollTo(0, 0));
+        // A change below the caret: nothing moves.
+        expect(await remote(page, lines.length, lines.length, '\nmore')).toBe(true);
+        expect(await scrollY(page)).toBe(0);
+        // Lines above the caret push it off screen: the view follows it.
+        await page.keyboard.press('ArrowDown');
+        expect(await remote(page, 0, 0, 'New\n'.repeat(60))).toBe(true);
+        await expect(field(page).getByText('Line 1', { exact: true })).toBeInViewport();
+        expect(await scrollY(page)).toBeGreaterThan(0);
+        // Without focus nothing scrolls.
+        await page.keyboard.press('ControlOrMeta+Home');
+        await page.keyboard.press('ArrowDown');
+        await scrollY(page);
+        await page.evaluate(() => { document.activeElement.blur(); window.scrollTo(0, 0); });
+        expect(await scrollY(page)).toBe(0);
+        expect(await remote(page, 0, 0, 'Old\n'.repeat(60))).toBe(true);
+        expect(await scrollY(page)).toBe(0);
+    });
+
+    test('waits for an IME composition to end', async ({ page }) => {
+        await write(page, 'Hi ');
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Input.imeSetComposition', { text: 'に', selectionStart: 1, selectionEnd: 1 });
+        expect(await remote(page, 0, 0, 'X')).toBe(false);
+        await cdp.send('Input.insertText', { text: 'に' });
+        await expect(source(page)).toHaveValue('Hi に');
+        expect(await remote(page, 0, 0, 'X')).toBe(true);
+        await expect(source(page)).toHaveValue('XHi に');
+    });
+});
+
+test('applyRemote keeps [[links]] shown and resolves new ones', async ({ page }) => {
+    await page.goto('/?wiki');
+    await expect(page.locator('.md-wiki-link')).toHaveText(['Plan']);
+    expect(await page.locator('oxidt-markdown-editor').evaluate(el => el.editor.applyRemote(0, 0, 'Also [[p2]]. '))).toBe(true);
+    await expect(source(page)).toHaveValue('Also [[p2]]. See [[p1]] and [[gone]].');
+    await expect(page.locator('.md-wiki-link')).toHaveText(['Brief', 'Plan']);
+});

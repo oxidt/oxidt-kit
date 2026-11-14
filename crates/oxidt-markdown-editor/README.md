@@ -195,6 +195,7 @@ editor.setValue(markdown);            // emits input if changed
 editor.setValue(markdown, false);     // controlled update, no input echo
 editor.insert(offset, imageMarkdown); // its own undo step; false if rejected
 editor.replace(from, to, text);       // one undo step, cursor after it; false if rejected
+editor.applyRemote(from, to, text);   // someone else's edit: no undo step (see below)
 editor.refreshLinks();                // re-resolve [[links]] in view (data-wiki-links)
 editor.show(false);                  // hide for a server-rendered preview
 editor.show(true);                   // show and focus
@@ -206,6 +207,43 @@ would exceed `maxlength`. `positionAt(event)` maps a drop's client coordinates
 to a document offset. Native `required`, `maxlength`, `disabled` (including a
 disabled fieldset), `readonly`, `placeholder`, labels and form reset are
 supported; `aria-invalid` and `aria-describedby` carry over to the editor. Server validation remains the application's responsibility.
+
+### Someone else's edits: `applyRemote`
+
+`editor.applyRemote(from, to, text)`, or `editor.applyRemote([{ from, to, text }, …])`
+for several at once, applies an edit that is not the writer's own, such as
+another person's lines merged in by the server. Offsets are in the current
+`textarea.value`, as with `replace`; a list must not overlap and is applied in
+one step.
+
+- It is not an undo step. Undo and redo still take back exactly the writer's
+  own edits, mapped through it; the other person's text stays.
+- The caret and selection stay put: before the change they do not move, after
+  it they move with the text, and strictly inside a replaced range they go to
+  the end of the new text.
+- It never focuses the editor and works with or without focus. It scrolls only
+  when the editor has focus, the caret line was in view and the change pushed
+  it out.
+- It sends no `input` event, like assigning `textarea.value`: the host made the
+  change, so an autosave listening for `input` does not save it as typing.
+  `textarea.value` holds the result when the call returns; a host that mirrors
+  the value (a Dioxus signal) updates it itself.
+- It applies to a disabled or readonly field and ignores `maxlength`: the text is
+  already stored.
+- During an IME composition it changes nothing and returns `false`, since
+  rewriting the text under a composition can break it. Retry after
+  `compositionend` (it bubbles out of the `oxidt-markdown-editor` element), or
+  fall back to merging on the next save. It also returns `false` for offsets
+  outside the text or overlapping changes, and `true` once applied.
+
+```js
+// The server merged another person's edit into the saved text: take only theirs,
+// at its offset in what the writer has now.
+const editor = textarea.closest("oxidt-markdown-editor")?.editor;
+if (!editor?.applyRemote(from, to, theirText)) {
+    // composing, or no editor: merge again on the next save
+}
+```
 
 Styles use DaisyUI colors when available, with plain CSS fallbacks. Override
 `--md-editor-background`, `--md-editor-color`, `--md-editor-border`,
