@@ -56,6 +56,10 @@ handling (Up/Down, Enter, Escape) and at the cursor. A pick replaces the
 trigger and query with `insert` as one undo step, cursor after it. The host
 filters; the editor shows the answer as given.
 
+When `[[` is among the triggers, the slash menu also offers `/link` ("Link to
+page", label key `link`): it writes `[[` and opens these completions. Unlike
+the block commands it also works after a space within a line.
+
 ```js
 textarea.addEventListener("markdown-complete", event => {
     event.preventDefault();

@@ -720,7 +720,7 @@ export function mountEditor(textarea, host) {
             new LanguageSupport(new Language(commonmarkLanguage.data, commonmarkLanguage.parser.configure([Strikethrough, Table, TaskList]), [], "markdown")),
             Prec.high(keymap.of(markdownKeymap)),
             history(), keymap.of([...defaultKeymap, ...historyKeymap]), controls.of(controlled()),
-            autocompletion({ override: [slashCommands(commandLabels(textarea)), hostCompletions(textarea)], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
+            autocompletion({ override: [slashCommands(commandLabels(textarea), () => completionTriggers(textarea).includes("[[")), hostCompletions(textarea)], icons: false, activateOnTypingDelay: 0, interactionDelay: 0 }),
             textarea.hasAttribute("data-wiki-links") ? [
                 wikiLinkField, linkResolver(textarea), Prec.high(keymap.of(wikiKeys)),
                 EditorView.atomicRanges.of(view => shownLinks(view.plugin(livePreview)?.decorations ?? Decoration.none)),

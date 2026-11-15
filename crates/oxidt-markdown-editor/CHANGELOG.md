@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- `/link` in the slash menu ("Link to page", label key `link`) writes `[[` and opens the
+  host's completions, for keyboards where `[` is hard to reach. It is offered only when
+  `data-completion-triggers` includes `[[`, and unlike the block commands it also works
+  after a space within a line.
+
 ## 0.7.1
 
 - `editor.applyRemote(from, to, text)` (or a list of `{ from, to, text }`) applies

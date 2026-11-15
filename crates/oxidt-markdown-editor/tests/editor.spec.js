@@ -113,6 +113,12 @@ for (const [command, markdown] of [
         .toBe(await source(page).inputValue());
 });
 
+test('/link is offered only when the host completes [[', async ({ page }) => {
+    await write(page, '/li');
+    await page.waitForTimeout(100);
+    await expect(page.getByRole('option')).toHaveCount(0);
+});
+
 test('slash menu filters, supports arrow keys, and undoes one insertion', async ({ page }) => {
     await write(page, '/');
     await expect(page.getByRole('option')).toHaveCount(9);
@@ -402,6 +408,32 @@ test.describe('host hooks', () => {
         await page.keyboard.insertText('pl');
         await page.getByRole('option', { name: /Plan/ }).click();
         await expect(source(page)).toHaveValue('Read [[p1]]');
+    });
+
+    test('/link writes [[ and opens the completions, at a line start and within a line', async ({ page }) => {
+        await write(page, '/li');
+        await expect(page.getByRole('option')).toHaveText(['/linkLink to page']);
+        await page.keyboard.press('Enter');
+        await expect(source(page)).toHaveValue('[[');
+        await expect(page.getByRole('option')).toHaveText(['PlanPage', 'BriefPage']);
+        await page.keyboard.press('Enter');
+        await expect(source(page)).toHaveValue('[[p1]]');
+        await write(page, 'Read /');
+        await expect(page.getByRole('option')).toHaveText(['/linkLink to page']);
+        await page.keyboard.insertText('link');
+        await expect(page.getByRole('option')).toHaveText(['/linkLink to page']);
+        await page.keyboard.press('Enter');
+        await expect(page.getByRole('option')).toHaveCount(2);
+        await page.keyboard.insertText('br');
+        await expect(page.getByRole('option')).toHaveText(['BriefPage']);
+        await page.keyboard.press('Enter');
+        await expect(source(page)).toHaveValue('Read [[p2]]');
+        // Not inside a word or a path, and a space after the slash closes it.
+        for (const text of ['and/', 'https://example.com/', 'a / ']) {
+            await write(page, text);
+            await page.waitForTimeout(100);
+            await expect(page.getByRole('option')).toHaveCount(0);
+        }
     });
 
     test('no completion inside code', async ({ page }) => {
