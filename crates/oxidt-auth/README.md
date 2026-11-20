@@ -9,7 +9,7 @@ code. FerrisKey is the identity provider; the login screen is yours.
 
 ```toml
 [dependencies]
-oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.18.0", features = ["server"] }
+oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.19.0", features = ["server"] }
 ```
 
 No default features. Enable `server` (Axum handlers, FerrisKey client, session
@@ -165,6 +165,43 @@ Two things to know when testing:
   `Login flow state mismatch`. Log out of the console and retry. The same
   happens after the page's 10-minute session refresh.
 
+## Generic OIDC issuer
+
+The same redirect login runs against any standard OpenID Connect issuer (such
+as oxidt-sso) instead of FerrisKey. Build the JWKS cache from the issuer; that
+alone switches `auth_router` over:
+
+```rust
+// SSO_ISSUER_URL=https://sso.example.com  SSO_CLIENT_ID=myapp
+let sso = oxidt_auth::SsoSettings::from_env()?; // Err names the missing var
+let state = AuthState {
+    jwks_cache: Arc::new(sso.jwks_cache()), // = JwksCache::oidc(&issuer, &client_id)
+    ..
+};
+let app = my_router.merge(auth_router(AuthConfig { base_url, ..Default::default() }, state));
+```
+
+Endpoints, keys and the accepted `iss` come from
+`{issuer}/.well-known/openid-configuration`, fetched on first use and kept once
+it succeeds, so the app boots while the issuer is down (`/auth/sso/start` answers `503`
+until it is back). The document's `issuer` must equal `SSO_ISSUER_URL` (a
+trailing `/` aside). The `ferriskey_*` fields and `sso_enabled` are not read.
+
+- mounted: `/auth/sso/start`, `/auth/callback`, `/auth/sso/complete`,
+  `/auth/logout`, `/auth/session/accept-tos` (and dev-login in debug builds);
+  the FerrisKey custom-login routes under `/auth/session/*` are not
+- id_token: RS256 with a `kid` from `jwks_uri`, `aud` = client id, the flow's
+  `nonce`, and an `email`; account binding follows the security notes
+  (`sub` first, an existing address only when `email_verified` is `true`)
+- logout redirects to `end_session_endpoint?client_id=…&post_logout_redirect_uri={base_url}{login_page_url}`;
+  without one, only the app's session ends
+
+Client registration at the issuer: a public client with PKCE (S256), redirect
+URI `{base_url}/auth/callback`, post-logout redirect URI
+`{base_url}{login_page_url}`, and credentialed CORS on the token endpoint for
+`{base_url}`'s origin — the callback page redeems the code from the browser
+with `credentials: 'include'`, exactly as in FerrisKey mode.
+
 ## Local mode (no identity provider)
 
 The `local-login` feature runs the crate without FerrisKey at all: email OTP
@@ -174,7 +211,7 @@ Party, and — opt-in — a password step. It implies `passkey-rp`, so the app s
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
 ```toml
-auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.18.0", optional = true }
+auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.19.0", optional = true }
 
 [features]
 server = ["auth/server", "auth/local-login", ...]

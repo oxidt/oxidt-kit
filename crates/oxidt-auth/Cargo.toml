@@ -113,7 +113,15 @@ name = "oxidt-auth"
 # privacy policy is a notice beside it, not part of the agreement.
 # 0.18.0 moves to topcoat 0.12. Breaking only in that apps must move to
 # topcoat 0.12 too; no API change.
-version = "0.18.0"
+# 0.19.0 runs the redirect SSO mode against any standard OpenID Connect issuer:
+# build `AuthState::jwks_cache` with `JwksCache::oidc(issuer_url, client_id)`
+# (or `SsoSettings::from_env()?.jwks_cache()`, reading `SSO_ISSUER_URL` /
+# `SSO_CLIENT_ID`) and `auth_router` takes endpoints, keys and the one accepted
+# `iss` from the issuer's discovery document, mounts the SSO routes without
+# `sso_enabled`, logs out through its `end_session_endpoint`, and leaves the
+# FerrisKey REST-driven custom login unmounted. Additive: `JwksCache::new` and
+# every FerrisKey path are unchanged.
+version = "0.19.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

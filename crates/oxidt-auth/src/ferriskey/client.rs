@@ -637,6 +637,21 @@ pub(crate) fn authorize_url(
     base_url: &str,
     flow: &FerrisKeyFlow,
 ) -> AuthResult<String> {
+    authorize_url_at(
+        &realm_url(base, realm, "/protocol/openid-connect/auth"),
+        client_id,
+        base_url,
+        flow,
+    )
+}
+
+/// The same request against any issuer's `authorization_endpoint`.
+pub(crate) fn authorize_url_at(
+    authorization_endpoint: &str,
+    client_id: &str,
+    base_url: &str,
+    flow: &FerrisKeyFlow,
+) -> AuthResult<String> {
     let nonce = flow
         .nonce
         .as_deref()
@@ -644,7 +659,7 @@ pub(crate) fn authorize_url(
     let code_verifier = flow.code_verifier.as_deref().ok_or_else(|| {
         AuthError::ServerStateError("Login flow missing PKCE verifier".to_string())
     })?;
-    let mut url = absolute(realm_url(base, realm, "/protocol/openid-connect/auth"))?;
+    let mut url = absolute(authorization_endpoint.to_string())?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -666,7 +681,20 @@ pub(crate) fn logout_url(
     client_id: &str,
     post_logout_redirect_uri: &str,
 ) -> AuthResult<String> {
-    let mut url = absolute(realm_url(base, realm, "/protocol/openid-connect/logout"))?;
+    logout_url_at(
+        &realm_url(base, realm, "/protocol/openid-connect/logout"),
+        client_id,
+        post_logout_redirect_uri,
+    )
+}
+
+/// RP-initiated logout against any issuer's `end_session_endpoint`.
+pub(crate) fn logout_url_at(
+    end_session_endpoint: &str,
+    client_id: &str,
+    post_logout_redirect_uri: &str,
+) -> AuthResult<String> {
+    let mut url = absolute(end_session_endpoint.to_string())?;
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("post_logout_redirect_uri", post_logout_redirect_uri);

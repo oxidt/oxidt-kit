@@ -313,7 +313,7 @@ fn registration_permitted(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{
         AuthConfig, AuthUserInfo, is_safe_redirect_url, is_valid_email, lookup_or_create_user,
         registration_allowed, registration_permitted,
@@ -327,12 +327,12 @@ mod tests {
     /// A store holding one user, reachable by sub and/or by email, that records
     /// the writes the login path makes.
     #[derive(Default)]
-    struct OneUserStore {
-        by_sub: Option<AuthUser>,
-        by_email: Option<AuthUser>,
-        sub_updates: Mutex<Vec<(String, String)>>,
-        created: Mutex<Vec<NewAuthUser>>,
-        invited: bool,
+    pub(in crate::handlers) struct OneUserStore {
+        pub(in crate::handlers) by_sub: Option<AuthUser>,
+        pub(in crate::handlers) by_email: Option<AuthUser>,
+        pub(in crate::handlers) sub_updates: Mutex<Vec<(String, String)>>,
+        pub(in crate::handlers) created: Mutex<Vec<NewAuthUser>>,
+        pub(in crate::handlers) invited: bool,
     }
 
     #[async_trait::async_trait]
@@ -413,7 +413,7 @@ mod tests {
         }
     }
 
-    fn state(store: Arc<OneUserStore>) -> AuthState {
+    pub(in crate::handlers) fn state(store: Arc<OneUserStore>) -> AuthState {
         AuthState {
             user_store: store,
             email_sender: Some(Arc::new(NoMail)),
@@ -429,7 +429,7 @@ mod tests {
         }
     }
 
-    fn victim() -> AuthUser {
+    pub(in crate::handlers) fn victim() -> AuthUser {
         AuthUser {
             id: "victim-id".to_string(),
             sub: "old-idp|victim".to_string(),

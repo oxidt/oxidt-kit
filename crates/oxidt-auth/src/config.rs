@@ -109,3 +109,91 @@ impl Default for AuthConfig {
         }
     }
 }
+
+/// `SSO_ISSUER_URL` and `SSO_CLIENT_ID`: the generic OIDC issuer an app logs
+/// in against when its operator selects SSO (each app owns that switch, e.g.
+/// `AUTH_MODE=sso`). Shared names, so every app is configured the same way.
+#[cfg(feature = "axum")]
+#[derive(Debug, Clone)]
+pub struct SsoSettings {
+    /// The issuer URL, exactly as it appears in the id_token's `iss`.
+    pub issuer_url: String,
+    /// The public client registered for this app at the issuer.
+    pub client_id: String,
+}
+
+#[cfg(feature = "axum")]
+impl SsoSettings {
+    pub const ISSUER_URL_VAR: &'static str = "SSO_ISSUER_URL";
+    pub const CLIENT_ID_VAR: &'static str = "SSO_CLIENT_ID";
+
+    /// Read both variables; an `Err` names the one that is missing or not an
+    /// absolute URL, for the app to fail at boot with.
+    pub fn from_env() -> crate::AuthResult<Self> {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup(get: impl Fn(&str) -> Option<String>) -> crate::AuthResult<Self> {
+        let required = |key: &str| {
+            get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    crate::AuthError::ServerStateError(format!("SSO login needs {key} to be set"))
+                })
+        };
+        let issuer_url = required(Self::ISSUER_URL_VAR)?;
+        url::Url::parse(&issuer_url).map_err(|e| {
+            crate::AuthError::ServerStateError(format!(
+                "{} is not an absolute URL ({issuer_url:?}): {e}",
+                Self::ISSUER_URL_VAR
+            ))
+        })?;
+        Ok(Self {
+            issuer_url,
+            client_id: required(Self::CLIENT_ID_VAR)?,
+        })
+    }
+
+    /// The JWKS cache for [`crate::AuthState::jwks_cache`]; it is what switches
+    /// `auth_router` to this issuer.
+    pub fn jwks_cache(&self) -> crate::JwksCache {
+        crate::JwksCache::oidc(&self.issuer_url, &self.client_id)
+    }
+}
+
+#[cfg(all(test, feature = "axum"))]
+mod tests {
+    use super::SsoSettings;
+
+    fn settings(vars: &[(&str, &str)]) -> crate::AuthResult<SsoSettings> {
+        SsoSettings::from_lookup(|key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        })
+    }
+
+    #[test]
+    fn sso_settings_name_the_missing_variable() {
+        let err = settings(&[("SSO_CLIENT_ID", "app")]).unwrap_err();
+        assert!(err.to_string().contains("SSO_ISSUER_URL"));
+        let err = settings(&[("SSO_ISSUER_URL", "https://sso.example")]).unwrap_err();
+        assert!(err.to_string().contains("SSO_CLIENT_ID"));
+        let err =
+            settings(&[("SSO_ISSUER_URL", "sso.example"), ("SSO_CLIENT_ID", "app")]).unwrap_err();
+        assert!(err.to_string().contains("not an absolute URL"));
+    }
+
+    #[test]
+    fn sso_settings_read_both_variables() {
+        let s = settings(&[
+            ("SSO_ISSUER_URL", " https://sso.example "),
+            ("SSO_CLIENT_ID", "app"),
+        ])
+        .unwrap();
+        assert_eq!(s.issuer_url, "https://sso.example");
+        assert_eq!(s.client_id, "app");
+        assert!(s.jwks_cache().is_oidc());
+    }
+}

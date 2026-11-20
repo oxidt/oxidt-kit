@@ -15,6 +15,8 @@ mod error;
 pub mod types;
 
 pub use config::AuthConfig;
+#[cfg(feature = "axum")]
+pub use config::SsoSettings;
 pub use error::{AuthError, AuthResult};
 pub use types::UserDataRefreshTrigger;
 
@@ -37,7 +39,7 @@ pub use traits::{AuthPasskeyStore, NewPasskey, StoredPasskey};
 pub mod jwt;
 
 #[cfg(feature = "axum")]
-pub use jwt::JwksCache;
+pub use jwt::{JwksCache, OidcEndpoints};
 
 #[cfg(feature = "axum")]
 pub mod ferriskey;

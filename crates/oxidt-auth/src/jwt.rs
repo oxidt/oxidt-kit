@@ -1,4 +1,5 @@
-//! JWKS fetching, caching, and JWT validation for FerrisKey-issued access tokens.
+//! JWKS fetching, caching, and JWT validation for FerrisKey-issued access tokens,
+//! or for any standard OpenID Connect issuer ([`JwksCache::oidc`]).
 //!
 //! Used to validate id_tokens received from the OIDC token endpoint after a
 //! successful authorization-code exchange, and Bearer tokens from mobile
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
 const CLOCK_LEEWAY_SECONDS: u64 = 60;
+const OIDC_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Claims extracted from a validated FerrisKey JWT.
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,19 @@ struct CachedJwks {
     fetched_at: Instant,
 }
 
+/// The parts of an issuer's discovery document
+/// (`{issuer}/.well-known/openid-configuration`) the redirect login uses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcEndpoints {
+    pub issuer: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub jwks_uri: String,
+    /// RP-initiated logout. Without it, logout ends only the app's session.
+    #[serde(default)]
+    pub end_session_endpoint: Option<String>,
+}
+
 /// Thread-safe JWKS cache with automatic refresh on unknown key IDs.
 pub struct JwksCache {
     jwks_url: String,
@@ -45,6 +60,12 @@ pub struct JwksCache {
     expected_audience: String,
     cache: RwLock<Option<CachedJwks>>,
     http: reqwest::Client,
+    /// Set by [`JwksCache::oidc`]: the issuer whose discovery document supplies
+    /// the JWKS URL, the one accepted `iss` and the SSO endpoints.
+    oidc_issuer: Option<String>,
+    /// Fetched on first use and kept once it succeeds, so an IdP that is down
+    /// at boot does not stop the app from starting.
+    discovery: tokio::sync::OnceCell<OidcEndpoints>,
 }
 
 impl JwksCache {
@@ -77,7 +98,84 @@ impl JwksCache {
             expected_audience: client_id.to_string(),
             cache: RwLock::new(None),
             http: reqwest::Client::new(),
+            oidc_issuer: None,
+            discovery: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// A cache for any standard OpenID Connect issuer, instead of FerrisKey's
+    /// realm URL shapes. Endpoints and keys come from
+    /// `{issuer_url}/.well-known/openid-configuration`, fetched lazily; the
+    /// document's `issuer` must equal `issuer_url` (a trailing `/` aside) and
+    /// becomes the only `iss` accepted. `client_id` is the expected `aud`.
+    ///
+    /// Building [`crate::AuthState`] with this cache switches `auth_router` to
+    /// the browser-redirect login against that issuer (see the README).
+    pub fn oidc(issuer_url: &str, client_id: &str) -> Self {
+        Self {
+            jwks_url: String::new(),
+            expected_issuers: Vec::new(),
+            expected_audience: client_id.to_string(),
+            cache: RwLock::new(None),
+            // Bounded: discovery runs one fetch at a time, so a hung issuer
+            // would otherwise stall every login, logout and token check.
+            http: reqwest::Client::builder()
+                .timeout(OIDC_HTTP_TIMEOUT)
+                .build()
+                .expect("reqwest::Client builder should not fail with a timeout"),
+            oidc_issuer: Some(issuer_url.to_string()),
+            discovery: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Whether this cache was built by [`JwksCache::oidc`].
+    pub fn is_oidc(&self) -> bool {
+        self.oidc_issuer.is_some()
+    }
+
+    /// The expected audience: the OIDC client id.
+    pub(crate) fn client_id(&self) -> &str {
+        &self.expected_audience
+    }
+
+    /// The issuer's discovered endpoints, or `None` for a FerrisKey cache.
+    pub async fn oidc_endpoints(&self) -> Result<Option<&OidcEndpoints>, JwtError> {
+        let Some(issuer_url) = self.oidc_issuer.as_deref() else {
+            return Ok(None);
+        };
+        self.discovery
+            .get_or_try_init(|| self.discover(issuer_url))
+            .await
+            .map(Some)
+    }
+
+    async fn discover(&self, issuer_url: &str) -> Result<OidcEndpoints, JwtError> {
+        let issuer_url = issuer_url.trim_end_matches('/');
+        let url = format!("{issuer_url}/.well-known/openid-configuration");
+        let endpoints: OidcEndpoints = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| {
+                tracing::error!("Failed to fetch OIDC discovery from {url}: {e:?}");
+                JwtError::JwksFetchFailed
+            })?
+            .json()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to parse OIDC discovery from {url}: {e:?}");
+                JwtError::JwksFetchFailed
+            })?;
+        if endpoints.issuer.trim_end_matches('/') != issuer_url {
+            tracing::error!(
+                "OIDC discovery at {url} names issuer {:?}, expected {issuer_url:?}",
+                endpoints.issuer
+            );
+            return Err(JwtError::JwksFetchFailed);
+        }
+        Ok(endpoints)
     }
 
     /// Validate a JWT token and return the extracted claims.
@@ -87,16 +185,24 @@ impl JwksCache {
         let header = jsonwebtoken::decode_header(token).map_err(|_| JwtError::InvalidToken)?;
         let kid = header.kid.as_deref().ok_or(JwtError::MissingKid)?;
 
+        let (jwks_url, issuers) = match self.oidc_endpoints().await? {
+            Some(endpoints) => (endpoints.jwks_uri.as_str(), vec![endpoints.issuer.as_str()]),
+            None => (
+                self.jwks_url.as_str(),
+                self.expected_issuers.iter().map(String::as_str).collect(),
+            ),
+        };
+
         // Try cached key first
         if let Some(key) = self.find_key(kid) {
-            return self.decode_with_key(token, &key);
+            return self.decode_with_key(token, &key, &issuers);
         }
 
         // Key not found or cache expired — refresh JWKS (handles key rotation)
-        self.refresh_jwks().await?;
+        self.refresh_jwks(jwks_url).await?;
 
         let key = self.find_key(kid).ok_or(JwtError::UnknownKid)?;
-        self.decode_with_key(token, &key)
+        self.decode_with_key(token, &key, &issuers)
     }
 
     fn find_key(&self, kid: &str) -> Option<jsonwebtoken::DecodingKey> {
@@ -115,14 +221,14 @@ impl JwksCache {
             .and_then(|jwk| jsonwebtoken::DecodingKey::from_jwk(jwk).ok())
     }
 
-    async fn refresh_jwks(&self) -> Result<(), JwtError> {
+    async fn refresh_jwks(&self, jwks_url: &str) -> Result<(), JwtError> {
         let jwks: jsonwebtoken::jwk::JwkSet = self
             .http
-            .get(&self.jwks_url)
+            .get(jwks_url)
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Failed to fetch JWKS from {}: {:?}", self.jwks_url, e);
+                tracing::error!("Failed to fetch JWKS from {}: {:?}", jwks_url, e);
                 JwtError::JwksFetchFailed
             })?
             .json()
@@ -135,7 +241,7 @@ impl JwksCache {
         tracing::info!(
             "Refreshed JWKS cache ({} keys) from {}",
             jwks.keys.len(),
-            self.jwks_url
+            jwks_url
         );
 
         let mut cache = self.cache.write().map_err(|_| JwtError::CacheLockError)?;
@@ -150,14 +256,10 @@ impl JwksCache {
         &self,
         token: &str,
         key: &jsonwebtoken::DecodingKey,
+        issuers: &[&str],
     ) -> Result<OidcJwtClaims, JwtError> {
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-        let issuers = self
-            .expected_issuers
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        validation.set_issuer(&issuers);
+        validation.set_issuer(issuers);
         validation.set_audience(&[&self.expected_audience]);
         // `set_required_spec_claims` enforces that these fields are present
         // in the payload (deserialization would fail anyway for the
@@ -171,7 +273,7 @@ impl JwksCache {
         let token_data =
             jsonwebtoken::decode::<OidcJwtClaims>(token, key, &validation).map_err(|e| {
                 tracing::warn!(
-                    expected_issuers = ?self.expected_issuers,
+                    expected_issuers = ?issuers,
                     expected_audience = %self.expected_audience,
                     "JWT validation failed: {:?}",
                     e

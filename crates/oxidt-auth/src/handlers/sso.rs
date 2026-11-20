@@ -12,6 +12,11 @@
 //! the realm would prompt again. The client is therefore a public one (no
 //! secret), and the id_token is accepted only with our audience and the nonce
 //! minted for this session.
+//!
+//! The same flow runs against any standard OpenID Connect issuer when
+//! `AuthState::jwks_cache` was built with [`crate::JwksCache::oidc`]: the
+//! endpoints then come from the issuer's discovery document instead of
+//! FerrisKey's realm URL shapes.
 
 use axum::extract::Query;
 use axum::http::header;
@@ -28,6 +33,7 @@ use super::shared;
 use crate::config::AuthConfig;
 use crate::error::{AuthError, AuthResult};
 use crate::ferriskey::{self, FerrisKeyFlow};
+use crate::jwt::OidcEndpoints;
 use crate::state::AuthState;
 
 const START_PATH: &str = "/auth/sso/start";
@@ -39,12 +45,25 @@ pub struct SsoStartQuery {
     pub next: Option<String>,
 }
 
-/// `GET /auth/sso/start?next=` — send the browser to FerrisKey.
+/// The generic issuer's endpoints, or `None` in FerrisKey mode. An issuer
+/// that cannot be reached answers `503`; the next request tries again.
+pub(crate) async fn oidc_endpoints(auth_state: &AuthState) -> AuthResult<Option<&OidcEndpoints>> {
+    auth_state.jwks_cache.oidc_endpoints().await.map_err(|e| {
+        tracing::warn!("OIDC discovery failed: {e}");
+        AuthError::ServiceUnavailable(
+            "The identity provider is unreachable — please retry".to_string(),
+        )
+    })
+}
+
+/// `GET /auth/sso/start?next=` — send the browser to the identity provider.
 pub async fn sso_start(
     Extension(auth_config): Extension<AuthConfig>,
+    Extension(auth_state): Extension<AuthState>,
     session: tower_sessions::Session,
     Query(query): Query<SsoStartQuery>,
 ) -> AuthResult<Response> {
+    let oidc = oidc_endpoints(&auth_state).await?;
     reset_pending_login_state(&session).await;
     if let Some(next) = query.next.filter(|n| shared::is_safe_redirect_url(n)) {
         session
@@ -53,13 +72,21 @@ pub async fn sso_start(
     }
     let flow = ferriskey::new_flow();
     store_flow(&session, &flow).await?;
-    let url = ferriskey::authorize_url(
-        &auth_config.ferriskey_url,
-        &auth_config.ferriskey_realm,
-        &auth_config.ferriskey_client_id,
-        &auth_config.base_url,
-        &flow,
-    )?;
+    let url = match oidc {
+        Some(endpoints) => ferriskey::authorize_url_at(
+            &endpoints.authorization_endpoint,
+            auth_state.jwks_cache.client_id(),
+            &auth_config.base_url,
+            &flow,
+        )?,
+        None => ferriskey::authorize_url(
+            &auth_config.ferriskey_url,
+            &auth_config.ferriskey_realm,
+            &auth_config.ferriskey_client_id,
+            &auth_config.base_url,
+            &flow,
+        )?,
+    };
     Ok(Redirect::to(&url).into_response())
 }
 
@@ -71,10 +98,11 @@ pub struct SsoCallbackQuery {
     pub state: Option<String>,
 }
 
-/// `GET /auth/callback?code&state` — FerrisKey's redirect target. Checks the
-/// state against the flow and serves the page that redeems the code.
+/// `GET /auth/callback?code&state` — the identity provider's redirect target.
+/// Checks the state against the flow and serves the page that redeems the code.
 pub async fn sso_callback(
     Extension(auth_config): Extension<AuthConfig>,
+    Extension(auth_state): Extension<AuthState>,
     session: tower_sessions::Session,
     Query(query): Query<SsoCallbackQuery>,
 ) -> AuthResult<Response> {
@@ -83,9 +111,19 @@ pub async fn sso_callback(
     let code_verifier = flow.code_verifier.ok_or_else(|| {
         AuthError::ServerStateError("Login flow missing PKCE verifier — please retry".to_string())
     })?;
+    let (token_url, client_id) = match oidc_endpoints(&auth_state).await? {
+        Some(endpoints) => (
+            endpoints.token_endpoint.clone(),
+            auth_state.jwks_cache.client_id().to_string(),
+        ),
+        None => (
+            ferriskey::token_url(&auth_config.ferriskey_url, &auth_config.ferriskey_realm),
+            auth_config.ferriskey_client_id.clone(),
+        ),
+    };
     callback_response(&CallbackConfig {
-        token_url: ferriskey::token_url(&auth_config.ferriskey_url, &auth_config.ferriskey_realm),
-        client_id: auth_config.ferriskey_client_id.clone(),
+        token_url,
+        client_id,
         redirect_uri: ferriskey::redirect_uri(&auth_config.base_url),
         code,
         code_verifier,
@@ -320,3 +358,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "sso_oidc_tests.rs"]
+mod oidc_tests;

@@ -33,6 +33,10 @@ const AUTH_BODY_LIMIT: usize = 64 * 1024;
 /// - `GET /auth/callback` — OIDC redirect target (only with `sso_enabled`)
 /// - `POST /auth/sso/complete` — Finish a browser-redirect login (only with `sso_enabled`)
 ///
+/// With a generic OIDC issuer (`AuthState::jwks_cache` built by
+/// `JwksCache::oidc`) only logout, accept-tos, the three SSO routes and the
+/// debug dev login are mounted: there is no FerrisKey REST API behind it.
+///
 /// Security middleware included:
 /// - **Rate limiting:** 20 requests/minute per IP (via `governor`)
 /// - **CSRF:** Origin/Referer validation on POST requests against `base_url`
@@ -42,10 +46,21 @@ const AUTH_BODY_LIMIT: usize = 64 * 1024;
 pub fn auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Router {
     let rate_limiter = AuthRateLimiter::new(rate_limit::AUTH_REQUESTS_PER_MINUTE);
 
+    // A generic OIDC issuer (`JwksCache::oidc`) has no FerrisKey REST API to
+    // drive the custom login with: it logs in by browser redirect only.
+    let generic_oidc = auth_state.jwks_cache.is_oidc();
+
     let router = Router::new()
         // Logout (POST to prevent forced-logout via cross-site image/link tags)
         .route("/auth/logout", post(session::logout))
-        // Session API v2 (custom login: auto-detect passkey/OTP)
+        .route(
+            "/auth/session/accept-tos",
+            post(handlers::accept_tos_handler),
+        );
+
+    // Session API v2 (custom login: auto-detect passkey/OTP), driven against
+    // FerrisKey's REST API — which a generic OIDC issuer does not have.
+    let custom_login = Router::new()
         .route("/auth/session/start", post(handlers::start_session))
         .route(
             "/auth/session/passkey/verify",
@@ -66,11 +81,12 @@ pub fn auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Router {
         .route(
             "/auth/session/captcha/verify",
             post(handlers::verify_captcha_handler),
-        )
-        .route(
-            "/auth/session/accept-tos",
-            post(handlers::accept_tos_handler),
         );
+    let router = if generic_oidc {
+        router
+    } else {
+        router.merge(custom_login)
+    };
 
     // Passkey enrollment, for apps that are their own Relying Party. Both are
     // session-authenticated: you enroll a passkey onto an account you are
@@ -91,9 +107,10 @@ pub fn auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Router {
     #[cfg(debug_assertions)]
     let router = router.route("/auth/dev-login", post(handlers::dev_login_handler));
 
-    // Browser-redirect login against FerrisKey's hosted page (see
-    // handlers::sso). Off by default: nothing is mounted unless the app opts in.
-    let router = if auth_config.sso_enabled {
+    // Browser-redirect login against FerrisKey's hosted page, or the generic
+    // issuer's (see handlers::sso). Off by default: nothing is mounted unless
+    // the app opts in.
+    let router = if auth_config.sso_enabled || generic_oidc {
         router
             .route("/auth/sso/start", get(handlers::sso_start))
             .route("/auth/callback", get(handlers::sso_callback))
