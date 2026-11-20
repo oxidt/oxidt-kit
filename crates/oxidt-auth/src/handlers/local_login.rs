@@ -385,6 +385,73 @@ async fn create_account(auth_state: &AuthState, email: &str) -> AuthResult<AuthU
     Ok(user)
 }
 
+/// With [`AuthConfig::passkey_only_once_enrolled`], whether `email` belongs to
+/// an account that has a passkey, and so may no longer sign in with an emailed
+/// code or a password. A store error is an error, never "no passkeys": this
+/// gate must not fail open.
+async fn passkey_is_the_only_way_in(
+    auth_state: &AuthState,
+    auth_config: &AuthConfig,
+    email: &str,
+) -> AuthResult<bool> {
+    if !auth_config.passkey_only_once_enrolled {
+        return Ok(false);
+    }
+    let Some(user) = auth_state.user_store.get_user_by_email(email).await? else {
+        return Ok(false);
+    };
+    let passkeys = auth_state.passkey_store.list_passkeys(&user.id).await?;
+    Ok(!passkeys.is_empty())
+}
+
+/// [`passkey_is_the_only_way_in`] for an account already resolved: the gate
+/// at sign-in runs against the exact account the session is opened for.
+async fn has_passkey_only(
+    auth_state: &AuthState,
+    auth_config: &AuthConfig,
+    user: &AuthUser,
+) -> AuthResult<bool> {
+    if !auth_config.passkey_only_once_enrolled {
+        return Ok(false);
+    }
+    Ok(!auth_state
+        .passkey_store
+        .list_passkeys(&user.id)
+        .await?
+        .is_empty())
+}
+
+/// What the gate above answers with.
+const PASSKEY_ONLY: &str = "This account signs in with its passkey.";
+
+/// Whether a code may be mailed to `email`: an account whose passkey is not
+/// its only way in, or an address permitted to register. Every send that
+/// reads the address back from the session asks, because the session can
+/// outlive the decision `start_session` made: a refused registration, or an
+/// account that enrolled its first passkey since.
+async fn ensure_code_recipient(
+    auth_state: &AuthState,
+    auth_config: &AuthConfig,
+    email: &str,
+) -> AuthResult<()> {
+    if passkey_is_the_only_way_in(auth_state, auth_config, email).await? {
+        return Err(AuthError::Unauthorized(PASSKEY_ONLY.to_string()));
+    }
+    if auth_state
+        .user_store
+        .get_user_by_email(email)
+        .await?
+        .is_none()
+        && !registration_allowed(auth_state, auth_config, email).await?
+    {
+        warn!("Refused to mail a code to '{email}' (no account, not permitted to register)");
+        return Err(AuthError::Unauthorized(
+            "Registration is not open for this address".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Send an email OTP and shape the start-session response around it.
 async fn send_otp_session(
     auth_state: &AuthState,
@@ -482,6 +549,8 @@ pub async fn start_session(
 
         if !registration_allowed(&auth_state, &auth_config, &email).await? {
             info!("Registration refused for '{email}' (not permitted to register)");
+            // Nothing later in this session may mail the refused address.
+            session.remove::<String>(LOGIN_EMAIL_KEY).await?;
             return Err(AuthError::Unauthorized(
                 "Registration is not open for this address".to_string(),
             ));
@@ -528,14 +597,15 @@ pub async fn start_session(
         };
     };
 
-    let passkeys = auth_state
-        .passkey_store
-        .list_passkeys(&user.id)
-        .await
-        .unwrap_or_else(|e| {
+    let passkeys = match auth_state.passkey_store.list_passkeys(&user.id).await {
+        Ok(passkeys) => passkeys,
+        // Carrying on without them would mail the code this flag withholds.
+        Err(e) if auth_config.passkey_only_once_enrolled => return Err(e),
+        Err(e) => {
             warn!("list_passkeys failed for {}: {:?}", user.id, e);
             Vec::new()
-        });
+        }
+    };
 
     if PASSKEY_LOGIN_ENABLED && !passkeys.is_empty() {
         let rp = relying_party(&auth_config)?;
@@ -554,8 +624,8 @@ pub async fn start_session(
         return Ok(Json(StartSessionResponse {
             public_key_options: Some(options),
             otp_sent: false,
-            otp: auth_state.email_sender.is_some(),
-            password: auth_config.password_login,
+            otp: auth_state.email_sender.is_some() && !auth_config.passkey_only_once_enrolled,
+            password: auth_config.password_login && !auth_config.passkey_only_once_enrolled,
             is_new_user: false,
             has_passkeys: true,
             captcha_required: None,
@@ -752,6 +822,12 @@ pub async fn verify_otp_handler(
         // has none.
         Ok(email) => {
             let user = resolve_or_create_account(&auth_state, &auth_config, &email).await?;
+            // The gate of record: however the code came to be sent, it does
+            // not open an account that has a passkey. Checked on the account
+            // resolved once, the one the session is opened for.
+            if has_passkey_only(&auth_state, &auth_config, &user).await? {
+                return Err(AuthError::Unauthorized(PASSKEY_ONLY.to_string()));
+            }
             let result = finalize_login(&auth_state, &auth_config, &session, &user).await?;
             Ok(Json(VerifyResponse::logged_in(result)))
         }
@@ -833,9 +909,6 @@ pub async fn verify_password_handler(
         return Err(AuthError::Unauthorized(REJECTED.to_string()));
     }
 
-    session.remove::<u32>(PASSWORD_ATTEMPTS_KEY).await?;
-    clear_password_failures(&account_key);
-
     // A password the store accepts is the operator's own say-so, so it admits
     // the address whatever the registration policy says — and provisions the
     // account on first login, exactly as a verified OTP does.
@@ -847,6 +920,18 @@ pub async fn verify_password_handler(
         }
     };
 
+    // A password is no way into an account that has a passkey, so a right
+    // one gets the same answer as a wrong one (the start response already
+    // pointed at the passkey) and stays counted: this endpoint must not
+    // confirm a password that no longer signs anyone in.
+    if has_passkey_only(&auth_state, &auth_config, &user).await? {
+        warn!("Password for '{email}' refused: the account signs in with its passkey");
+        return Err(AuthError::Unauthorized(REJECTED.to_string()));
+    }
+
+    session.remove::<u32>(PASSWORD_ATTEMPTS_KEY).await?;
+    clear_password_failures(&account_key);
+
     let result = finalize_login(&auth_state, &auth_config, &session, &user).await?;
     Ok(Json(VerifyResponse::logged_in(result)))
 }
@@ -855,6 +940,7 @@ pub async fn verify_password_handler(
 
 pub async fn resend_otp_handler(
     Extension(auth_state): Extension<AuthState>,
+    Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
 ) -> AuthResult<Json<VerifyResponse>> {
     let email = session
@@ -881,6 +967,7 @@ pub async fn resend_otp_handler(
         .await?
         .unwrap_or_else(|| "login".to_string());
 
+    ensure_code_recipient(&auth_state, &auth_config, &email).await?;
     generate_and_send_otp(&auth_state, &session, &email, &purpose).await?;
 
     Ok(Json(VerifyResponse {
@@ -910,6 +997,8 @@ pub async fn passkey_fallback_to_otp(
         .get::<String>(LOGIN_EMAIL_KEY)
         .await?
         .ok_or_else(|| AuthError::BadRequest("No login session in progress".to_string()))?;
+
+    ensure_code_recipient(&auth_state, &auth_config, &email).await?;
 
     // A new-user session's OTP is gated behind the registration captcha
     // (`/captcha/verify` is the only sanctioned OTP send for new users).
@@ -955,6 +1044,7 @@ pub async fn passkey_fallback_to_otp(
 
 pub async fn verify_captcha_handler(
     Extension(auth_state): Extension<AuthState>,
+    Extension(auth_config): Extension<AuthConfig>,
     session: tower_sessions::Session,
     Json(req): Json<VerifyCaptchaRequest>,
 ) -> AuthResult<Json<CaptchaVerifyResponse>> {
@@ -999,6 +1089,7 @@ pub async fn verify_captcha_handler(
         .await?
         .ok_or_else(|| AuthError::ServerStateError("Missing login email".to_string()))?;
 
+    ensure_code_recipient(&auth_state, &auth_config, &email).await?;
     generate_and_send_otp(&auth_state, &session, &email, "login").await?;
 
     info!("Captcha verified, OTP sent to new user: {}", email);
@@ -1091,9 +1182,10 @@ async fn finalize_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_ACCOUNT_PASSWORD_FAILURES, StartSessionRequest, StartSessionResponse,
-        VerifyPasswordRequest, passkey_conditional_options, passkey_fallback_to_otp,
-        resolve_or_create_account, start_session, verify_password_handler,
+        MAX_ACCOUNT_PASSWORD_FAILURES, StartSessionRequest, StartSessionResponse, VerifyOtpRequest,
+        VerifyPasswordRequest, VerifyResponse, passkey_conditional_options,
+        passkey_fallback_to_otp, resolve_or_create_account, start_session, verify_otp_handler,
+        verify_password_handler,
     };
     use axum::{Extension, Json};
     use tower_sessions::{MemoryStore, Session};
@@ -1634,5 +1726,496 @@ mod tests {
         assert!(resp.otp_sent);
         assert!(resp.otp, "a server without the field had a sender");
         assert!(!resp.password);
+    }
+
+    // ── passkey_only_once_enrolled ──────────────────────────────────
+
+    /// A store where the account has one passkey, or that fails to answer.
+    struct OnePasskey {
+        fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthPasskeyStore for OnePasskey {
+        async fn list_passkeys(&self, user_id: &str) -> AuthResult<Vec<StoredPasskey>> {
+            if self.fails {
+                return Err(AuthError::ServerStateError("store down".to_string()));
+            }
+            Ok(vec![StoredPasskey {
+                id: "pk".to_string(),
+                user_id: user_id.to_string(),
+                credential_id: "Y3JlZA".to_string(),
+                public_key_cose: Vec::new(),
+                sign_count: 0,
+                transports: Vec::new(),
+                name: "key".to_string(),
+            }])
+        }
+        async fn find_passkey_by_credential_id(
+            &self,
+            _: &str,
+        ) -> AuthResult<Option<StoredPasskey>> {
+            Ok(None)
+        }
+        async fn insert_passkey(&self, _: &str, _: NewPasskey) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn touch_passkey(&self, _: &str, _: i64, _: bool) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn delete_passkey(&self, _: &str, _: &str) -> AuthResult<bool> {
+            Ok(false)
+        }
+    }
+
+    /// An existing account with a passkey, a mailer, and the sent counter.
+    fn state_with_passkey(fails: bool) -> (AuthState, Arc<AtomicUsize>) {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            password: Some(("me@example.com".to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+        let sender = Arc::new(NoMail::default());
+        let sent = sender.0.clone();
+        let state = AuthState::local(store, sender, Arc::new(OnePasskey { fails }));
+        (state, sent)
+    }
+
+    fn passkey_only(on: bool) -> AuthConfig {
+        AuthConfig {
+            base_url: "https://app.example.com".to_string(),
+            passkey_only_once_enrolled: on,
+            ..Default::default()
+        }
+    }
+
+    async fn start(
+        state: &AuthState,
+        config: &AuthConfig,
+        session: &Session,
+    ) -> AuthResult<StartSessionResponse> {
+        start_session(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+            axum::http::HeaderMap::new(),
+            Json(StartSessionRequest {
+                email: "me@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await
+        .map(|r| r.0)
+    }
+
+    /// A code that would verify, as if one had been mailed to the account.
+    async fn plant_code(session: &Session) {
+        use super::super::otp::{
+            CUSTOM_OTP_ATTEMPTS_KEY, CUSTOM_OTP_CODE_KEY, CUSTOM_OTP_EMAIL_KEY,
+            CUSTOM_OTP_EXPIRES_AT_KEY,
+        };
+        session.insert(CUSTOM_OTP_CODE_KEY, "123456").await.unwrap();
+        session
+            .insert(CUSTOM_OTP_EMAIL_KEY, "me@example.com")
+            .await
+            .unwrap();
+        session
+            .insert(
+                CUSTOM_OTP_EXPIRES_AT_KEY,
+                chrono::Utc::now().timestamp() + 600,
+            )
+            .await
+            .unwrap();
+        session.insert(CUSTOM_OTP_ATTEMPTS_KEY, 0u32).await.unwrap();
+    }
+
+    async fn submit_code(
+        state: &AuthState,
+        config: &AuthConfig,
+        session: &Session,
+    ) -> AuthResult<Json<VerifyResponse>> {
+        verify_otp_handler(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+            Json(VerifyOtpRequest {
+                code: "123456".to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn passkey_only_offers_no_code_and_refuses_to_send_one() {
+        let (state, sent) = state_with_passkey(false);
+        let config = passkey_only(true);
+        let session = session();
+
+        let resp = start(&state, &config, &session).await.unwrap();
+        assert!(resp.has_passkeys);
+        assert!(resp.public_key_options.is_some());
+        assert!(!resp.otp, "the page must not offer the code");
+        assert!(!resp.otp_sent);
+
+        let fallback = passkey_fallback_to_otp(Extension(state), Extension(config), session).await;
+        assert!(matches!(fallback, Err(AuthError::Unauthorized(_))));
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn passkey_only_refuses_a_valid_code_and_a_right_password() {
+        let (state, _) = state_with_passkey(false);
+        let config = AuthConfig {
+            password_login: true,
+            ..passkey_only(true)
+        };
+        let session = session();
+        plant_code(&session).await;
+
+        let code = submit_code(&state, &config, &session).await;
+        assert!(matches!(code, Err(AuthError::Unauthorized(_))));
+
+        let password = verify_password_handler(
+            Extension(state),
+            Extension(config),
+            session,
+            Json(VerifyPasswordRequest {
+                email: "me@example.com".to_string(),
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(password, Err(AuthError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn passkey_only_fails_closed_when_the_passkey_store_is_down() {
+        let (state, sent) = state_with_passkey(true);
+        let config = passkey_only(true);
+        let session = session();
+
+        assert!(start(&state, &config, &session).await.is_err());
+        plant_code(&session).await;
+        assert!(submit_code(&state, &config, &session).await.is_err());
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn passkey_only_still_lets_an_account_without_a_passkey_use_the_code() {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+        let (state, sent) = state_with_email(store);
+        let config = passkey_only(true);
+        let session = session();
+
+        let resp = start(&state, &config, &session).await.unwrap();
+        assert!(resp.otp_sent);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        plant_code(&session).await;
+        let verified = submit_code(&state, &config, &session).await.unwrap().0;
+        assert!(verified.success);
+    }
+
+    #[tokio::test]
+    async fn without_the_flag_a_passkey_account_keeps_the_code() {
+        let (state, sent) = state_with_passkey(false);
+        let config = passkey_only(false);
+        let session = session();
+
+        let resp = start(&state, &config, &session).await.unwrap();
+        assert!(resp.has_passkeys);
+        assert!(resp.otp);
+
+        let fallback = passkey_fallback_to_otp(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(fallback.otp_sent);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        plant_code(&session).await;
+        let verified = submit_code(&state, &config, &session).await.unwrap().0;
+        assert!(verified.success);
+    }
+
+    #[tokio::test]
+    async fn passkey_only_counts_a_wrong_password_as_a_wrong_password() {
+        // Its own address: the per-account counter is process-wide.
+        let email = "pk-wrong-password@example.com";
+        let store = Arc::new(OneUserStore {
+            user: Some(AuthUser {
+                email: email.to_string(),
+                ..existing()
+            }),
+            password: Some((email.to_string(), "hunter2".to_string())),
+            ..Default::default()
+        });
+        let state = AuthState::local(
+            store,
+            Arc::new(NoMail::default()),
+            Arc::new(OnePasskey { fails: false }),
+        );
+        let config = AuthConfig {
+            password_login: true,
+            ..passkey_only(true)
+        };
+        let session = session();
+        let attempt = |password: &str| {
+            verify_password_handler(
+                Extension(state.clone()),
+                Extension(config.clone()),
+                session.clone(),
+                Json(VerifyPasswordRequest {
+                    email: email.to_string(),
+                    password: password.to_string(),
+                }),
+            )
+        };
+
+        match attempt("wrong").await {
+            Err(AuthError::Unauthorized(msg)) => assert_eq!(msg, "Wrong email or password."),
+            other => panic!(
+                "expected the generic 401, got {:?}",
+                other.map(|r| r.0.success)
+            ),
+        }
+        let attempts = session
+            .get::<u32>(crate::handlers::session_auth::PASSWORD_ATTEMPTS_KEY)
+            .await
+            .unwrap();
+        assert_eq!(attempts, Some(1), "a wrong password is an attempt");
+
+        match attempt("hunter2").await {
+            Err(AuthError::Unauthorized(msg)) => {
+                assert_eq!(
+                    msg, "Wrong email or password.",
+                    "a right password is not confirmed"
+                )
+            }
+            other => panic!(
+                "a right password must not sign in, got {:?}",
+                other.map(|r| r.0.success)
+            ),
+        }
+        let attempts = session
+            .get::<u32>(crate::handlers::session_auth::PASSWORD_ATTEMPTS_KEY)
+            .await
+            .unwrap();
+        assert_eq!(attempts, Some(2), "and it still counts");
+        assert!(
+            session
+                .get::<crate::session::LoggedInData>(crate::session::LOGGED_IN_USER_SESSION_KEY)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn passkey_only_resend_mails_no_code() {
+        // A login session that was mailed a code before the first passkey.
+        let (state, sent) = state_with_passkey(false);
+        let config = passkey_only(true);
+        let session = session();
+        plant_code(&session).await;
+        session
+            .insert(super::LOGIN_EMAIL_KEY, "me@example.com")
+            .await
+            .unwrap();
+
+        let resend = super::resend_otp_handler(Extension(state), Extension(config), session).await;
+        assert!(matches!(resend, Err(AuthError::Unauthorized(_))));
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Registration shut to `stranger@example.com`, with a mailer.
+    fn closed_with_mail() -> (AuthState, Arc<AtomicUsize>, AuthConfig) {
+        let store = Arc::new(OneUserStore {
+            user: Some(existing()),
+            ..Default::default()
+        });
+        let (state, sent) = state_with_email(store);
+        let config = AuthConfig {
+            allowed_registration_emails: vec!["ops@example.com".to_string()],
+            ..passkey_only(false)
+        };
+        (state, sent, config)
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_leaves_no_address_to_mail() {
+        let (state, sent, config) = closed_with_mail();
+        let session = session();
+
+        let refused = start_session(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+            axum::http::HeaderMap::new(),
+            Json(StartSessionRequest {
+                email: "stranger@example.com".to_string(),
+                redirect_url: None,
+            }),
+        )
+        .await;
+        assert!(matches!(refused, Err(AuthError::Unauthorized(_))));
+
+        let fallback = passkey_fallback_to_otp(Extension(state), Extension(config), session).await;
+        assert!(fallback.is_err());
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn no_send_path_mails_an_address_that_may_not_register() {
+        // However the session came to name it.
+        let (state, sent, config) = closed_with_mail();
+        let session = session();
+        session
+            .insert(super::LOGIN_EMAIL_KEY, "stranger@example.com")
+            .await
+            .unwrap();
+
+        let fallback = passkey_fallback_to_otp(
+            Extension(state.clone()),
+            Extension(config.clone()),
+            session.clone(),
+        )
+        .await;
+        assert!(matches!(fallback, Err(AuthError::Unauthorized(_))));
+
+        plant_code(&session).await;
+        let resend = super::resend_otp_handler(Extension(state), Extension(config), session).await;
+        assert!(matches!(resend, Err(AuthError::Unauthorized(_))));
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// The address names account A on the first read and account B (which
+    /// has a passkey) on every read after, as if reassigned in between.
+    #[derive(Default)]
+    struct ReassignedStore {
+        reads: AtomicUsize,
+    }
+
+    fn account(id: &str) -> AuthUser {
+        AuthUser {
+            id: id.to_string(),
+            ..existing()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthUserStore for ReassignedStore {
+        async fn get_user_by_sub(&self, _: &str) -> AuthResult<Option<AuthUser>> {
+            Ok(None)
+        }
+        async fn get_user_by_email(&self, _: &str) -> AuthResult<Option<AuthUser>> {
+            let first = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Ok(Some(account(if first { "a" } else { "b" })))
+        }
+        async fn get_user_by_id(&self, id: &str) -> AuthResult<Option<AuthUser>> {
+            Ok(Some(account(id)))
+        }
+        async fn create_user(&self, _: NewAuthUser) -> AuthResult<AuthUser> {
+            panic!("both accounts exist")
+        }
+        async fn update_user_sub(&self, _: &str, _: &str) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn create_personal_organization(&self, _: &str, _: &str) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn update_tos_acceptance(&self, _: &str, _: AuthTosAcceptance) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn determine_post_login_redirect(&self, _: &str, d: &str) -> AuthResult<String> {
+            Ok(d.to_string())
+        }
+        async fn verify_password(&self, _: &str, password: &str) -> AuthResult<bool> {
+            Ok(password == "hunter2")
+        }
+    }
+
+    /// Account `b` has a passkey, nobody else does.
+    struct PasskeyForB;
+
+    #[async_trait::async_trait]
+    impl AuthPasskeyStore for PasskeyForB {
+        async fn list_passkeys(&self, user_id: &str) -> AuthResult<Vec<StoredPasskey>> {
+            if user_id != "b" {
+                return Ok(Vec::new());
+            }
+            OnePasskey { fails: false }.list_passkeys(user_id).await
+        }
+        async fn find_passkey_by_credential_id(
+            &self,
+            _: &str,
+        ) -> AuthResult<Option<StoredPasskey>> {
+            Ok(None)
+        }
+        async fn insert_passkey(&self, _: &str, _: NewPasskey) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn touch_passkey(&self, _: &str, _: i64, _: bool) -> AuthResult<()> {
+            Ok(())
+        }
+        async fn delete_passkey(&self, _: &str, _: &str) -> AuthResult<bool> {
+            Ok(false)
+        }
+    }
+
+    async fn signed_in_as(session: &Session) -> Option<String> {
+        session
+            .get::<crate::session::LoggedInData>(crate::session::LOGGED_IN_USER_SESSION_KEY)
+            .await
+            .unwrap()
+            .map(|d| d.id)
+    }
+
+    #[tokio::test]
+    async fn passkey_only_checks_the_account_it_signs_in() {
+        let config = AuthConfig {
+            password_login: true,
+            ..passkey_only(true)
+        };
+        let fresh_state = || {
+            AuthState::local(
+                Arc::new(ReassignedStore::default()),
+                Arc::new(NoMail::default()),
+                Arc::new(PasskeyForB),
+            )
+        };
+
+        let by_code = session();
+        plant_code(&by_code).await;
+        let _ = submit_code(&fresh_state(), &config, &by_code).await;
+        assert_ne!(
+            signed_in_as(&by_code).await.as_deref(),
+            Some("b"),
+            "emailed code"
+        );
+
+        let by_password = session();
+        let _ = verify_password_handler(
+            Extension(fresh_state()),
+            Extension(config.clone()),
+            by_password.clone(),
+            Json(VerifyPasswordRequest {
+                email: "reassigned@example.com".to_string(),
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await;
+        assert_ne!(
+            signed_in_as(&by_password).await.as_deref(),
+            Some("b"),
+            "password"
+        );
     }
 }

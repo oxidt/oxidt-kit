@@ -26,15 +26,27 @@ const CLIENT_ID: &str = "oxidt-ci";
 /// An issuer at `http://127.0.0.1:<port>` whose discovery document names
 /// `claimed_issuer` (normally its own URL).
 async fn mock_issuer(claimed_issuer: Option<&str>) -> String {
+    let claimed_issuer = claimed_issuer.map(str::to_string);
+    mock_issuer_with(move |doc| {
+        if let Some(iss) = claimed_issuer {
+            doc["issuer"] = json!(iss);
+        }
+    })
+    .await
+}
+
+/// An issuer whose discovery document `edit` may change.
+async fn mock_issuer_with(edit: impl FnOnce(&mut Value)) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let doc = json!({
-        "issuer": claimed_issuer.unwrap_or(&base),
+    let mut doc = json!({
+        "issuer": base,
         "authorization_endpoint": format!("{base}/authorize"),
         "token_endpoint": format!("{base}/token"),
         "jwks_uri": format!("{base}/jwks"),
         "end_session_endpoint": format!("{base}/logout"),
     });
+    edit(&mut doc);
     let jwks = json!({ "keys": [{
         "kty": "RSA", "alg": "RS256", "use": "sig", "kid": KID, "n": MODULUS, "e": "AQAB",
     }]});
@@ -138,6 +150,130 @@ async fn foreign_issuer_audience_expiry_and_key_are_rejected() {
 }
 
 #[tokio::test]
+async fn a_token_shared_with_or_issued_to_another_client_is_rejected() {
+    let issuer = mock_issuer(None).await;
+    let cache = JwksCache::oidc(&issuer, CLIENT_ID);
+    let with = |field: &str, value: Value| {
+        let mut c = claims(&issuer, "n");
+        c[field] = value;
+        sign(&c)
+    };
+
+    for (what, token) in [
+        ("azp", with("azp", json!("another-app"))),
+        (
+            "second audience",
+            with("aud", json!([CLIENT_ID, "another-app"])),
+        ),
+    ] {
+        assert!(
+            matches!(
+                cache.validate_token(&token).await,
+                Err(JwtError::ValidationFailed)
+            ),
+            "{what} not rejected"
+        );
+    }
+    for (what, token) in [
+        ("own azp", with("azp", json!(CLIENT_ID))),
+        ("one-element aud", with("aud", json!([CLIENT_ID]))),
+    ] {
+        assert!(
+            cache.validate_token(&token).await.is_ok(),
+            "{what} rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ferriskey_tokens_keep_their_extra_audiences() {
+    let idp = mock_issuer(None).await;
+    let cache = JwksCache::new(&idp, &idp, "r", CLIENT_ID);
+    let mut c = claims(&format!("{idp}/realms/r"), "n");
+    c["aud"] = json!([CLIENT_ID, "account"]);
+    c["azp"] = json!("account");
+    assert!(cache.validate_token(&sign(&c)).await.is_ok());
+}
+
+#[tokio::test]
+async fn an_issuer_or_endpoint_off_https_is_refused() {
+    // Not loopback, and never contacted: refused before any fetch.
+    let cache = JwksCache::oidc("http://idp.example.test", CLIENT_ID);
+    assert!(cache.oidc_endpoints().await.is_err());
+
+    for field in [
+        "jwks_uri",
+        "authorization_endpoint",
+        "token_endpoint",
+        "end_session_endpoint",
+    ] {
+        let issuer = mock_issuer_with(|doc| doc[field] = json!("http://idp.example.test/x")).await;
+        let cache = JwksCache::oidc(&issuer, CLIENT_ID);
+        assert!(cache.oidc_endpoints().await.is_err(), "{field} over http");
+    }
+}
+
+#[tokio::test]
+async fn a_localhost_issuer_is_reached_on_loopback_whatever_dns_says() {
+    // `issuer.localhost` need not resolve anywhere on this machine: the
+    // issuer client pins it to loopback, where the mock listens.
+    let mut named = String::new();
+    let issuer = mock_issuer_with(|doc| {
+        let base = doc["issuer"].as_str().unwrap().to_string();
+        named = base.replace("127.0.0.1", "issuer.localhost");
+        for field in [
+            "issuer",
+            "authorization_endpoint",
+            "token_endpoint",
+            "jwks_uri",
+            "end_session_endpoint",
+        ] {
+            let v = doc[field]
+                .as_str()
+                .unwrap()
+                .replace("127.0.0.1", "issuer.localhost");
+            doc[field] = json!(v);
+        }
+    })
+    .await;
+    assert!(issuer.contains("127.0.0.1"));
+    let cache = JwksCache::oidc(&named, CLIENT_ID);
+    let endpoints = cache.oidc_endpoints().await.unwrap().unwrap();
+    assert!(endpoints.jwks_uri.starts_with("http://issuer.localhost:"));
+    let token = sign(&claims(&named, "n"));
+    assert!(
+        cache.validate_token(&token).await.is_ok(),
+        "keys fetched via loopback"
+    );
+}
+
+#[test]
+fn https_is_required_except_on_loopback() {
+    use crate::jwt::is_secure_issuer_url as ok;
+    for url in [
+        "https://idp.example",
+        "http://localhost:8080",
+        "http://LOCALHOST",
+        "http://sso.localhost",
+        "http://127.0.0.1",
+        "http://127.1.2.3:9",
+        "http://[::1]:9000/x",
+    ] {
+        assert!(ok(url), "{url}");
+    }
+    for url in [
+        "http://idp.example",
+        "http://localhost.example",
+        "http://10.0.0.1",
+        "http://[::2]",
+        "ftp://idp.example",
+        "idp.example",
+    ] {
+        assert!(!ok(url), "{url}");
+    }
+}
+
+#[tokio::test]
 async fn a_discovery_document_for_another_issuer_is_refused() {
     let issuer = mock_issuer(Some("https://evil.example")).await;
     let cache = JwksCache::oidc(&issuer, CLIENT_ID);
@@ -185,15 +321,14 @@ impl Browser {
     }
 }
 
-/// The app with `auth_router` over a generic issuer. `sso_enabled` is left
-/// off: the issuer alone selects the redirect login.
+/// The app with `auth_router` over a generic issuer, where ann may register.
+/// `sso_enabled` is left off: the issuer alone selects the redirect login.
 async fn app(issuer: &str, store: Arc<OneUserStore>) -> Browser {
-    app_with(
-        AuthConfig::default(),
-        JwksCache::oidc(issuer, CLIENT_ID),
-        store,
-    )
-    .await
+    let config = AuthConfig {
+        allowed_registration_emails: vec!["ann@example.com".to_string()],
+        ..Default::default()
+    };
+    app_with(config, JwksCache::oidc(issuer, CLIENT_ID), store).await
 }
 
 /// The app in FerrisKey mode against `idp`, realm `r`.
@@ -350,6 +485,111 @@ async fn an_unverified_email_cannot_claim_an_existing_account() {
         .await;
     assert_eq!(resp.status(), 401);
     assert!(store.sub_updates.lock().unwrap().is_empty());
+}
+
+/// One login against `issuer` with `edit` applied to ann's claims; the
+/// status and body of `/auth/sso/complete`.
+async fn complete_with(
+    browser: &mut Browser,
+    issuer: &str,
+    edit: impl FnOnce(&mut Value),
+) -> (u16, String) {
+    let q = start(browser, issuer).await;
+    let mut c = claims(issuer, &q["nonce"]);
+    edit(&mut c);
+    let resp = browser
+        .post_json("/auth/sso/complete", json!({ "id_token": sign(&c) }))
+        .await;
+    (resp.status().as_u16(), resp.text().await.unwrap())
+}
+
+/// Registration closed to ann: an allowlist naming someone else.
+fn closed() -> AuthConfig {
+    AuthConfig {
+        allowed_registration_emails: vec!["bob@example.com".to_string()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_new_identity_follows_the_apps_registration_policy() {
+    let issuer = mock_issuer(None).await;
+
+    // Closed: refused with a reason, nothing created, no session.
+    let store = Arc::new(OneUserStore::default());
+    let mut browser = app_with(closed(), JwksCache::oidc(&issuer, CLIENT_ID), store.clone()).await;
+    let (status, body) = complete_with(&mut browser, &issuer, |_| {}).await;
+    assert_eq!(status, 401);
+    assert!(body.contains("not permitted to use this app"), "{body}");
+    assert!(store.created.lock().unwrap().is_empty());
+    let logout = browser.post_json("/auth/logout", json!({})).await;
+    assert_eq!(logout.headers()["location"], "/", "no session was opened");
+
+    // Invited: admitted although the allowlist names someone else.
+    let store = Arc::new(OneUserStore {
+        invited: true,
+        ..Default::default()
+    });
+    let mut browser = app_with(closed(), JwksCache::oidc(&issuer, CLIENT_ID), store.clone()).await;
+    assert_eq!(complete_with(&mut browser, &issuer, |_| {}).await.0, 200);
+    assert_eq!(store.created.lock().unwrap().len(), 1);
+
+    // Allowlisted, but the issuer does not vouch for the address.
+    let store = Arc::new(OneUserStore::default());
+    let mut browser = app(&issuer, store.clone()).await;
+    let (status, body) = complete_with(&mut browser, &issuer, |c| {
+        c["email_verified"] = json!(false)
+    })
+    .await;
+    assert_eq!(status, 401);
+    assert!(body.contains("not verified"), "{body}");
+    assert!(store.created.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_existing_account_signs_in_while_registration_is_closed() {
+    let issuer = mock_issuer(None).await;
+    let store = Arc::new(OneUserStore {
+        by_sub: Some(victim()),
+        ..Default::default()
+    });
+    let mut browser = app_with(closed(), JwksCache::oidc(&issuer, CLIENT_ID), store.clone()).await;
+    let (status, _) = complete_with(&mut browser, &issuer, |_| {}).await;
+    assert_eq!(status, 200);
+    assert!(store.created.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_account_gone_since_it_was_found_is_not_recreated_unchecked() {
+    // Found by sub at the first read, deleted before the next.
+    let issuer = mock_issuer(None).await;
+    let store = Arc::new(OneUserStore {
+        by_sub_once: std::sync::Mutex::new(Some(victim())),
+        ..Default::default()
+    });
+    let mut browser = app_with(closed(), JwksCache::oidc(&issuer, CLIENT_ID), store.clone()).await;
+    let (status, _) = complete_with(&mut browser, &issuer, |_| {}).await;
+    // One read decides: it found the account, so that account signs in, and
+    // no replacement is created behind the registration policy's back.
+    assert_eq!(status, 200);
+    assert!(store.created.lock().unwrap().is_empty());
+}
+
+#[cfg(feature = "passkey-rp")]
+#[tokio::test]
+async fn passkey_enrollment_is_mounted_only_in_ferriskey_mode() {
+    let issuer = mock_issuer(None).await;
+    let mut browser = app(&issuer, Arc::default()).await;
+    let resp = browser
+        .post_json("/auth/passkey/enroll/options", json!({}))
+        .await;
+    assert_eq!(resp.status(), 404);
+
+    let mut browser = ferriskey_app(&issuer, true).await;
+    let resp = browser
+        .post_json("/auth/passkey/enroll/options", json!({}))
+        .await;
+    assert_eq!(resp.status(), 401, "mounted, and wants a session");
 }
 
 #[tokio::test]

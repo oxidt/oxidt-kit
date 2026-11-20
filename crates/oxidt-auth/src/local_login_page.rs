@@ -753,11 +753,16 @@ pub fn LocalLoginPage(
                                 disabled: is_loading(),
                                 {crate::locale::tr("Back")}
                             }
-                            button {
-                                class: "btn btn-ghost btn-sm",
-                                onclick: on_use_email_code,
-                                disabled: is_loading(),
-                                {crate::locale::tr("Use email code instead")}
+                            // Withheld when the start response said `otp: false`
+                            // (no sender, or the account's passkey is its only
+                            // way in): the fallback would only answer 401.
+                            if otp_available() {
+                                button {
+                                    class: "btn btn-ghost btn-sm",
+                                    onclick: on_use_email_code,
+                                    disabled: is_loading(),
+                                    {crate::locale::tr("Use email code instead")}
+                                }
                             }
                         }
                     }
@@ -779,11 +784,16 @@ pub fn LocalLoginPage(
                                 disabled: is_loading(),
                                 {crate::locale::tr("Try again")}
                             }
-                            button {
-                                class: "btn btn-ghost btn-sm",
-                                onclick: on_use_email_code,
-                                disabled: is_loading(),
-                                {crate::locale::tr("Use email code instead")}
+                            // Withheld when the start response said `otp: false`
+                            // (no sender, or the account's passkey is its only
+                            // way in): the fallback would only answer 401.
+                            if otp_available() {
+                                button {
+                                    class: "btn btn-ghost btn-sm",
+                                    onclick: on_use_email_code,
+                                    disabled: is_loading(),
+                                    {crate::locale::tr("Use email code instead")}
+                                }
                             }
                             button {
                                 class: "btn btn-ghost btn-sm",

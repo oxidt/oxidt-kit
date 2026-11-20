@@ -35,7 +35,7 @@ use crate::handlers::otp::{
 };
 use crate::handlers::shared;
 use crate::handlers::shared::registration_allowed;
-use crate::handlers::shared::{AuthUserInfo, determine_post_login_redirect, lookup_or_create_user};
+use crate::handlers::shared::{AuthUserInfo, determine_post_login_redirect, lookup_or_admit_user};
 use crate::session::LoggedInData;
 use crate::state::AuthState;
 use crate::types::AuthTosAcceptance;
@@ -952,7 +952,10 @@ pub(super) async fn finalize_login(
     session: &tower_sessions::Session,
     info: &AuthUserInfo,
 ) -> AuthResult<FinalizeResult> {
-    let user = lookup_or_create_user(auth_state, info).await?;
+    // A generic issuer's new identities are admitted by this app's
+    // registration policy (see `admit_new_oidc_account`); FerrisKey's are not.
+    let admit_with = auth_state.jwks_cache.is_oidc().then_some(auth_config);
+    let user = lookup_or_admit_user(auth_state, info, admit_with).await?;
 
     info!("FerrisKey login successful for user {}", user.id);
 

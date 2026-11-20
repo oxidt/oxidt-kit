@@ -35,7 +35,8 @@ const AUTH_BODY_LIMIT: usize = 64 * 1024;
 ///
 /// With a generic OIDC issuer (`AuthState::jwks_cache` built by
 /// `JwksCache::oidc`) only logout, accept-tos, the three SSO routes and the
-/// debug dev login are mounted: there is no FerrisKey REST API behind it.
+/// debug dev login are mounted: there is no FerrisKey REST API behind it, and
+/// no passkey enrollment, since that issuer's login never asks for one.
 ///
 /// Security middleware included:
 /// - **Rate limiting:** 20 requests/minute per IP (via `governor`)
@@ -91,16 +92,21 @@ pub fn auth_router(auth_config: AuthConfig, auth_state: AuthState) -> Router {
     // Passkey enrollment, for apps that are their own Relying Party. Both are
     // session-authenticated: you enroll a passkey onto an account you are
     // already logged into, so there is no unauthenticated entry point here.
+    // Not with a generic issuer: nothing here would ever verify the key.
     #[cfg(feature = "passkey-rp")]
-    let router = router
-        .route(
-            "/auth/passkey/enroll/options",
-            post(handlers::passkey_enroll_options),
-        )
-        .route(
-            "/auth/passkey/enroll/verify",
-            post(handlers::passkey_enroll_verify),
-        );
+    let router = if generic_oidc {
+        router
+    } else {
+        router
+            .route(
+                "/auth/passkey/enroll/options",
+                post(handlers::passkey_enroll_options),
+            )
+            .route(
+                "/auth/passkey/enroll/verify",
+                post(handlers::passkey_enroll_verify),
+            )
+    };
 
     // Development-only login bypass (see handlers::dev_login). Compiled out of
     // release builds; also requires DEV_LOGIN=true at runtime.

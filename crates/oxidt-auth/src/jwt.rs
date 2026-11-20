@@ -13,6 +13,61 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
 const CLOCK_LEEWAY_SECONDS: u64 = 60;
 const OIDC_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `localhost` and `*.localhost`: names [`LoopbackPinned`] always resolves to
+/// this machine.
+fn is_localhost_name(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "localhost" || host.ends_with(".localhost")
+}
+
+/// The generic issuer client's resolver: `localhost` and `*.localhost` go to
+/// 127.0.0.1 and ::1 whatever DNS or a hosts file says, so the plain-http
+/// exception below really is a loopback connection, redirects included.
+/// Every other name goes to the system resolver.
+struct LoopbackPinned;
+
+impl reqwest::dns::Resolve for LoopbackPinned {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = if is_localhost_name(&host) {
+                vec![
+                    (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+                    (std::net::Ipv6Addr::LOCALHOST, 0).into(),
+                ]
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0))
+                        .map(Iterator::collect::<Vec<_>>)
+                })
+                .await??
+            };
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Whether a generic issuer's URL may be trusted for discovery, keys or the
+/// login endpoints: https, or plain http to loopback for development: a
+/// loopback address (`127.0.0.0/8`, `::1`), or `localhost` / `*.localhost`,
+/// which the issuer client pins to loopback ([`LoopbackPinned`]). Signing keys
+/// fetched over plain http elsewhere are only as good as the network path.
+pub(crate) fn is_secure_issuer_url(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Domain(host)) => is_localhost_name(host),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 /// Claims extracted from a validated FerrisKey JWT.
 #[derive(Debug, Deserialize)]
 pub struct OidcJwtClaims {
@@ -107,7 +162,12 @@ impl JwksCache {
     /// realm URL shapes. Endpoints and keys come from
     /// `{issuer_url}/.well-known/openid-configuration`, fetched lazily; the
     /// document's `issuer` must equal `issuer_url` (a trailing `/` aside) and
-    /// becomes the only `iss` accepted. `client_id` is the expected `aud`.
+    /// becomes the only `iss` accepted. `client_id` is the expected `aud`, and
+    /// an id_token must name no other audience or authorized party (`azp`).
+    ///
+    /// The issuer and every endpoint it lists must be https, except on a
+    /// loopback host (`localhost`, `*.localhost`, 127.0.0.1, ::1); otherwise
+    /// discovery fails and so does every login.
     ///
     /// Building [`crate::AuthState`] with this cache switches `auth_router` to
     /// the browser-redirect login against that issuer (see the README).
@@ -121,6 +181,17 @@ impl JwksCache {
             // would otherwise stall every login, logout and token check.
             http: reqwest::Client::builder()
                 .timeout(OIDC_HTTP_TIMEOUT)
+                .dns_resolver(LoopbackPinned)
+                // A redirect must not move discovery or the keys off https.
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("too many redirects")
+                    } else if is_secure_issuer_url(attempt.url().as_str()) {
+                        attempt.follow()
+                    } else {
+                        attempt.error("redirect to a non-https URL")
+                    }
+                }))
                 .build()
                 .expect("reqwest::Client builder should not fail with a timeout"),
             oidc_issuer: Some(issuer_url.to_string()),
@@ -151,6 +222,10 @@ impl JwksCache {
 
     async fn discover(&self, issuer_url: &str) -> Result<OidcEndpoints, JwtError> {
         let issuer_url = issuer_url.trim_end_matches('/');
+        if !is_secure_issuer_url(issuer_url) {
+            tracing::error!("OIDC issuer {issuer_url:?} is not https (or a loopback host)");
+            return Err(JwtError::JwksFetchFailed);
+        }
         let url = format!("{issuer_url}/.well-known/openid-configuration");
         let endpoints: OidcEndpoints = self
             .http
@@ -174,6 +249,27 @@ impl JwksCache {
                 endpoints.issuer
             );
             return Err(JwtError::JwksFetchFailed);
+        }
+        for (name, url) in [
+            ("jwks_uri", Some(&endpoints.jwks_uri)),
+            (
+                "authorization_endpoint",
+                Some(&endpoints.authorization_endpoint),
+            ),
+            ("token_endpoint", Some(&endpoints.token_endpoint)),
+            (
+                "end_session_endpoint",
+                endpoints.end_session_endpoint.as_ref(),
+            ),
+        ] {
+            if let Some(url) = url
+                && !is_secure_issuer_url(url)
+            {
+                tracing::error!(
+                    "OIDC discovery at {url:?} lists {name} {url:?}, which is not https"
+                );
+                return Err(JwtError::JwksFetchFailed);
+            }
         }
         Ok(endpoints)
     }
@@ -270,8 +366,8 @@ impl JwksCache {
         validation.validate_nbf = true;
         validation.leeway = CLOCK_LEEWAY_SECONDS;
 
-        let token_data =
-            jsonwebtoken::decode::<OidcJwtClaims>(token, key, &validation).map_err(|e| {
+        let token_data = jsonwebtoken::decode::<serde_json::Value>(token, key, &validation)
+            .map_err(|e| {
                 tracing::warn!(
                     expected_issuers = ?issuers,
                     expected_audience = %self.expected_audience,
@@ -281,7 +377,31 @@ impl JwksCache {
                 JwtError::ValidationFailed
             })?;
 
-        Ok(token_data.claims)
+        // `set_audience` accepts an `aud` array if any entry matches. A
+        // generic issuer serves other clients too, so a token that also
+        // names one of them, or was issued to one (`azp`), is not ours.
+        if self.is_oidc() {
+            let audiences = match &token_data.claims["aud"] {
+                serde_json::Value::Array(list) => list.len(),
+                _ => 1,
+            };
+            let azp = token_data.claims.get("azp");
+            let azp_ok = azp.is_none_or(|azp| azp.as_str() == Some(&self.expected_audience));
+            if audiences != 1 || !azp_ok {
+                tracing::warn!(
+                    expected_audience = %self.expected_audience,
+                    ?azp,
+                    audiences,
+                    "id_token names another audience or authorized party"
+                );
+                return Err(JwtError::ValidationFailed);
+            }
+        }
+
+        serde_json::from_value(token_data.claims).map_err(|e| {
+            tracing::warn!("JWT claims malformed: {e}");
+            JwtError::ValidationFailed
+        })
     }
 }
 

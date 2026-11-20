@@ -90,7 +90,9 @@ pub fn registration_options(
     exclude_credential_ids: &[String],
 ) -> Value {
     json!({
-        "rp": { "id": rp.rp_id, "name": "SeggWat" },
+        // The crate has no product name to offer; the host is what a person
+        // recognises next to a passkey, and it is never another app's name.
+        "rp": { "id": rp.rp_id, "name": rp.rp_id },
         "user": {
             "id": URL_SAFE_NO_PAD.encode(user_id),
             "name": user_name,

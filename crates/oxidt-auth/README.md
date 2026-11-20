@@ -9,7 +9,7 @@ code. FerrisKey is the identity provider; the login screen is yours.
 
 ```toml
 [dependencies]
-oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.19.0", features = ["server"] }
+oxidt-auth = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-auth-v0.20.0", features = ["server"] }
 ```
 
 No default features. Enable `server` (Axum handlers, FerrisKey client, session
@@ -190,9 +190,28 @@ trailing `/` aside). The `ferriskey_*` fields and `sso_enabled` are not read.
 - mounted: `/auth/sso/start`, `/auth/callback`, `/auth/sso/complete`,
   `/auth/logout`, `/auth/session/accept-tos` (and dev-login in debug builds);
   the FerrisKey custom-login routes under `/auth/session/*` are not
-- id_token: RS256 with a `kid` from `jwks_uri`, `aud` = client id, the flow's
-  `nonce`, and an `email`; account binding follows the security notes
-  (`sub` first, an existing address only when `email_verified` is `true`)
+- https only: `SSO_ISSUER_URL` (checked by `SsoSettings::from_env`), the
+  discovery fetch and its redirects, `jwks_uri` and the authorization, token
+  and end-session endpoints. Plain http is accepted for loopback during
+  development: 127.0.0.1, ::1, or `localhost` / `*.localhost`, which the
+  issuer client always connects to on loopback, whatever DNS says.
+- id_token: RS256 with a `kid` from `jwks_uri`, `aud` = client id and nothing
+  else (a second audience, or an `azp` naming another client, is rejected),
+  the flow's `nonce`, and an `email`; account binding follows the security
+  notes (`sub` first, an existing address only when `email_verified` is `true`)
+- **registration is the app's**: the issuer proves who someone is, not that
+  they may use this app. An identity with an account here signs in; a new
+  account is created only when `email_verified` is `true` and the app's
+  registration policy admits that address (`allowed_registration_emails`,
+  `allowed_registration_domains`, `open_registration`,
+  `AuthUserStore::is_invited`, or the first-account bootstrap), the same
+  decision the local flow makes. Known limit: the first-account bootstrap is
+  not atomic, so two first sign-ins at the same moment on an empty store can
+  both get an account; use an allowlist or invite when that matters. Anyone else sees "not permitted to use this
+  app" on the callback page and gets no session. FerrisKey mode is unchanged:
+  its redirect login (`sso_enabled`) still creates any account the realm lets
+  through, while its custom login applies the policy as before.
+- no `/auth/passkey/enroll/*`: this login never asks for an app passkey
 - logout redirects to `end_session_endpoint?client_id=…&post_logout_redirect_uri={base_url}{login_page_url}`;
   without one, only the app's session ends
 
@@ -211,7 +230,7 @@ Party, and — opt-in — a password step. It implies `passkey-rp`, so the app s
 `get_user_by_id` (the passkey-autofill path has a credential row and no email).
 
 ```toml
-auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.19.0", optional = true }
+auth = { package = "oxidt-auth", git = "…/oxidt-kit.git", tag = "oxidt-auth-v0.20.0", optional = true }
 
 [features]
 server = ["auth/server", "auth/local-login", ...]
@@ -264,6 +283,27 @@ invites people answers `AuthUserStore::is_invited` so an invitation is enough on
 its own. A verified OTP for
 a permitted, unknown address creates the account; `sub` is minted by the crate
 (an opaque random token) and never rewritten afterwards.
+
+### Passkey only, once enrolled
+
+`AuthConfig::passkey_only_once_enrolled` (default `false`) is for a deployment
+whose inbox must not be a way around the passkey, such as an identity provider.
+The emailed code still creates the account and signs in an account without a
+passkey. From the first enrolled passkey on, that account is refused the code
+and the password step: `/auth/session/start` answers `otp: false` (both login
+pages then hide "Use email code instead"), and no code is mailed to it:
+`/auth/session/passkey-fallback-otp`, `/auth/session/otp/resend` and
+`/auth/session/captcha/verify` answer 401, as does `/auth/session/otp/verify`
+for a code sent before the passkey. `/auth/session/password/verify` gives a
+right password the same generic 401 as a wrong one, counted against both caps,
+and opens no session. A passkey-store error is an error
+here, never "no passkeys". Recovery is the app's job: deleting the account's
+passkeys reopens the emailed code.
+
+Whatever this flag says, no send path mails a code to an address that has no
+account and may not register: a refused `/auth/session/start` leaves nothing
+in the session to send to, and the fallback, resend and captcha paths check the
+address again.
 
 ### Password login, and running without SMTP
 

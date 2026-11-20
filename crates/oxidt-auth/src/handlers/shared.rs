@@ -112,6 +112,18 @@ pub async fn lookup_or_create_user(
     auth_state: &AuthState,
     info: &AuthUserInfo,
 ) -> AuthResult<AuthUser> {
+    lookup_or_admit_user(auth_state, info, None).await
+}
+
+/// [`lookup_or_create_user`], where a new account must also pass
+/// [`admit_new_oidc_account`] against `admit_with` when it is given. The
+/// decision sits in the branch that creates the account, so no earlier
+/// lookup can vouch for an account that is gone by the time it is created.
+pub(super) async fn lookup_or_admit_user(
+    auth_state: &AuthState,
+    info: &AuthUserInfo,
+    admit_with: Option<&AuthConfig>,
+) -> AuthResult<AuthUser> {
     // First try by OIDC subject ID (already migrated users)
     let user_by_sub = auth_state
         .user_store
@@ -175,6 +187,9 @@ pub async fn lookup_or_create_user(
     }
 
     // Completely new user - create them
+    if let Some(auth_config) = admit_with {
+        admit_new_oidc_account(auth_state, auth_config, info).await?;
+    }
     info!("User not found, creating new user...");
 
     let user = auth_state
@@ -203,6 +218,42 @@ pub async fn lookup_or_create_user(
     }
 
     Ok(user)
+}
+
+/// A generic OIDC issuer proves who someone is, not that they may use this
+/// app: it may serve other apps and people. A new account is the app's own
+/// registration decision, the one the local flow makes, taken on the
+/// issuer's word about the address only when it says the address is
+/// verified.
+///
+/// FerrisKey mode does not come through here: its redirect login
+/// (`sso_enabled`) creates any account the realm lets through, as before; its
+/// custom login checks the policy itself.
+async fn admit_new_oidc_account(
+    auth_state: &AuthState,
+    auth_config: &AuthConfig,
+    info: &AuthUserInfo,
+) -> AuthResult<()> {
+    if !info.email_verified {
+        warn!(
+            "Refused a new account for sub {}: email not verified",
+            info.sub
+        );
+        return Err(AuthError::Unauthorized(
+            "Your identity provider has not verified your email address, so it cannot be used \
+             to create an account here."
+                .to_string(),
+        ));
+    }
+    let email = info.email.trim().to_lowercase();
+    if !registration_allowed(auth_state, auth_config, &email).await? {
+        warn!("Refused a new account for '{email}': not permitted to register");
+        return Err(AuthError::Unauthorized(
+            "Your account is not permitted to use this app. Ask its administrator for access."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Check subscriptions and determine redirect URL after login.
@@ -333,12 +384,17 @@ pub(super) mod tests {
         pub(in crate::handlers) sub_updates: Mutex<Vec<(String, String)>>,
         pub(in crate::handlers) created: Mutex<Vec<NewAuthUser>>,
         pub(in crate::handlers) invited: bool,
+        /// Found by sub on the first lookup only, as if deleted right after.
+        pub(in crate::handlers) by_sub_once: Mutex<Option<AuthUser>>,
     }
 
     #[async_trait::async_trait]
     impl AuthUserStore for OneUserStore {
         async fn get_user_by_sub(&self, _sub: &str) -> AuthResult<Option<AuthUser>> {
-            Ok(self.by_sub.clone())
+            Ok(self
+                .by_sub
+                .clone()
+                .or_else(|| self.by_sub_once.lock().unwrap().take()))
         }
         async fn get_user_by_email(&self, _email: &str) -> AuthResult<Option<AuthUser>> {
             Ok(self.by_email.clone())

@@ -121,7 +121,21 @@ name = "oxidt-auth"
 # `sso_enabled`, logs out through its `end_session_endpoint`, and leaves the
 # FerrisKey REST-driven custom login unmounted. Additive: `JwksCache::new` and
 # every FerrisKey path are unchanged.
-version = "0.19.0"
+# 0.20.0 adds `AuthConfig::passkey_only_once_enrolled` (default off) to the
+# local flow: an account that has a passkey is refused the emailed code and
+# the password step (right or wrong, a password gets the generic answer and
+# counts against the caps), and a passkey-store error no longer falls back to the code
+# while it is on. No local send path (fallback, resend, captcha) mails an
+# address that has no account and may not register. Generic OIDC mode now
+# needs https for the issuer and every discovered endpoint (http only on
+# loopback; `*.localhost` is pinned there), rejects an id_token with a foreign `azp` or a second
+# audience, no longer mounts passkey enrollment, and creates a new account only
+# when the app's registration policy admits the token's verified email; an
+# existing account signs in as before. Passkey creation names the relying
+# party by its host instead of the hard-coded "SeggWat". Breaking: `AuthConfig`
+# gains a required field, and generic OIDC apps whose policy is closed (the
+# default once a user exists) refuse new SSO users until they allow them.
+version = "0.20.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

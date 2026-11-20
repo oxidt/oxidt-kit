@@ -77,6 +77,15 @@ pub struct AuthConfig {
     /// anyone in at all (see [`crate::AuthState::local_without_email`]).
     pub password_login: bool,
 
+    /// Once an account has a passkey, that passkey is its only way in on the
+    /// self-owned login flow (`local_auth_router`): the emailed code and the
+    /// password step are refused for it. The code still creates the account
+    /// and signs in an account that has not enrolled a passkey yet. For a
+    /// deployment whose inbox must not be a way around the passkey, such as
+    /// an identity provider; the app then needs its own recovery path
+    /// (deleting the account's passkeys reopens the emailed code).
+    pub passkey_only_once_enrolled: bool,
+
     // ── Terms of service ──────────────────────────────────────────
     /// The terms version a user must have accepted to log in, or `None` for
     /// no acceptance step at all. Compared to what the store returns in
@@ -105,6 +114,7 @@ impl Default for AuthConfig {
             allowed_registration_domains: Vec::new(),
             open_registration: false,
             password_login: false,
+            passkey_only_once_enrolled: false,
             tos_version: None,
         }
     }
@@ -127,8 +137,10 @@ impl SsoSettings {
     pub const ISSUER_URL_VAR: &'static str = "SSO_ISSUER_URL";
     pub const CLIENT_ID_VAR: &'static str = "SSO_CLIENT_ID";
 
-    /// Read both variables; an `Err` names the one that is missing or not an
-    /// absolute URL, for the app to fail at boot with.
+    /// Read both variables; an `Err` names the one that is missing, not an
+    /// absolute URL, or not https (plain http is accepted for a loopback
+    /// host: `localhost`, `*.localhost`, 127.0.0.1, ::1), for the app to fail
+    /// at boot with.
     pub fn from_env() -> crate::AuthResult<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -149,6 +161,12 @@ impl SsoSettings {
                 Self::ISSUER_URL_VAR
             ))
         })?;
+        if !crate::jwt::is_secure_issuer_url(&issuer_url) {
+            return Err(crate::AuthError::ServerStateError(format!(
+                "{} must be an https URL ({issuer_url:?}); plain http only for a loopback host",
+                Self::ISSUER_URL_VAR
+            )));
+        }
         Ok(Self {
             issuer_url,
             client_id: required(Self::CLIENT_ID_VAR)?,
@@ -183,6 +201,27 @@ mod tests {
         let err =
             settings(&[("SSO_ISSUER_URL", "sso.example"), ("SSO_CLIENT_ID", "app")]).unwrap_err();
         assert!(err.to_string().contains("not an absolute URL"));
+    }
+
+    #[test]
+    fn sso_settings_want_https_except_on_loopback() {
+        for insecure in ["http://sso.example", "http://10.0.0.1", "ftp://sso.example"] {
+            let err =
+                settings(&[("SSO_ISSUER_URL", insecure), ("SSO_CLIENT_ID", "app")]).unwrap_err();
+            assert!(err.to_string().contains("https"), "{insecure}: {err}");
+        }
+        for ok in [
+            "https://sso.example",
+            "http://localhost:8080",
+            "http://sso.localhost",
+            "http://127.0.0.1:9000",
+            "http://[::1]:9000",
+        ] {
+            assert!(
+                settings(&[("SSO_ISSUER_URL", ok), ("SSO_CLIENT_ID", "app")]).is_ok(),
+                "{ok}"
+            );
+        }
     }
 
     #[test]
