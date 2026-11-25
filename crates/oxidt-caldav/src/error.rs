@@ -25,6 +25,14 @@ pub enum Error {
     /// The server's multistatus answer could not be read.
     #[error("the server sent an unreadable answer")]
     Xml,
+    /// A server-sent href, or a URL passed in, names another origin than
+    /// [`Account::base`](crate::Account::base). Nothing was sent there: the
+    /// credentials only go to the account's own server. Holds that origin.
+    #[error("the calendar server pointed to another host ({0})")]
+    OtherHost(String),
+    /// A response body ran past the size cap; the rest was not read.
+    #[error("the server sent an answer too large to read")]
+    TooLarge,
     /// A URL could not be built from the parts given.
     #[error("that address can't hold a calendar object")]
     Url,

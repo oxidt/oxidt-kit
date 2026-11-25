@@ -7,7 +7,7 @@ Every request goes through [`oxidt-egress`](../oxidt-egress).
 
 ```toml
 [dependencies]
-oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.2.0" }
+oxidt-caldav = { git = "https://github.com/oxidt/oxidt-kit.git", tag = "oxidt-caldav-v0.3.0" }
 ```
 
 An app that also calls egress directly depends on `oxidt-caldav` only and
@@ -24,8 +24,7 @@ app password and a URL. That covers iCloud, Fastmail, Nextcloud and Radicale.
 
 **Discovery is a chain.** RFC 4791 finds calendars through `PROPFIND`s:
 `current-user-principal`, then `calendar-home-set`, then the collections in the
-home. Each step returns an href that can point at another host (iCloud does
-this). So every URL in the chain is checked and pinned on its own. A bare
+home. Every URL in the chain is checked and pinned on its own. A bare
 Nextcloud host is tried again under `/remote.php/dav/`.
 
 The alternative is to skip discovery and have the user paste one collection
@@ -59,6 +58,18 @@ database doesn't know, is taken as UTC.
 
 **No redirects, public https only.** The account URL is user input. A `PUT`
 that followed a redirect would write to a URL the user never saw.
+
+**Credentials stay on the account's origin.** Every request sends the
+account's Basic credentials, so it only goes to the scheme, host and port of
+`Account::base`. An href on another origin, from discovery, a `query` or the
+caller, is `Error::OtherHost` and nothing is sent. The exception is iCloud:
+`caldav.icloud.com` names a calendar home on a partition host such as
+`p42-caldav.icloud.com`, so an account on an `icloud.com` host may reach other
+`icloud.com` hosts (https, default port). A WebDAV folder on another host than
+the calendar server needs its own `Account` with the folder as `base`.
+
+**Bodies are capped at 8 MiB.** Each response, error pages included, is read
+in chunks and abandoned past the cap (`Error::TooLarge`).
 
 ## API
 

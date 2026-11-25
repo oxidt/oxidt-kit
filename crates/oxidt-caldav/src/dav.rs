@@ -11,6 +11,11 @@ const TIMEOUTS: Timeouts = Timeouts {
     connect: Duration::from_secs(10),
     total: Duration::from_secs(20),
 };
+/// The most a single response body may hold, error pages included. A judgment
+/// call, not a measurement: a multistatus entry is around a kilobyte, so this
+/// fits thousands of objects in one REPORT while keeping a hostile server
+/// from filling memory.
+const MAX_BODY: usize = 8 * 1024 * 1024;
 const DAV: &str = "DAV:";
 const CALDAV: &str = "urn:ietf:params:xml:ns:caldav";
 const APPLE: &str = "http://apple.com/ns/ical/";
@@ -35,7 +40,7 @@ pub async fn discover(account: &Account) -> Result<Vec<Calendar>, Error> {
         .into_iter()
         .find_map(|r| r.principal)
     {
-        Some(href) => resolve(&base, &href)?,
+        Some(href) => resolve(account, &base, &href)?,
         None => base,
     };
     let (status, body) = propfind(account, &principal, "0", HOME).await?;
@@ -43,13 +48,13 @@ pub async fn discover(account: &Account) -> Result<Vec<Calendar>, Error> {
         .into_iter()
         .find_map(|r| r.home)
         .ok_or(Error::NotFound)?;
-    let home = resolve(&principal, &home)?;
+    let home = resolve(account, &principal, &home)?;
     let (status, body) = propfind(account, &home, "1", LIST).await?;
     multistatus(status, &body)?
         .into_iter()
         .filter(|r| r.calendar)
         .map(|r| {
-            let href = resolve(&home, &r.href)?;
+            let href = resolve(account, &home, &r.href)?;
             let name = r.name.filter(|n| !n.is_empty()).unwrap_or_else(|| {
                 href.as_str()
                     .trim_end_matches('/')
@@ -95,6 +100,7 @@ pub async fn put_ics(
         resource_url(collection, uid)?.as_str(),
         &UrlPolicy::default(),
     )?;
+    trusted(account, &url)?;
     let client = client_for(&url).await?;
     Ok(put_with(&client, account, url, body, mode).await?.outcome)
 }
@@ -111,6 +117,7 @@ pub async fn put_object(
     mode: PutMode<'_>,
 ) -> Result<Stored, Error> {
     let url = check_url(url.as_str(), &UrlPolicy::default())?;
+    trusted(account, &url)?;
     let client = client_for(&url).await?;
     put_with(&client, account, url, body, mode).await
 }
@@ -122,6 +129,7 @@ pub async fn query(
     query: Query,
 ) -> Result<Vec<Object>, Error> {
     let url = check_url(collection.as_str(), &UrlPolicy::default())?;
+    trusted(account, &url)?;
     let client = client_for(&url).await?;
     query_with(&client, account, url, query).await
 }
@@ -130,6 +138,7 @@ pub async fn query(
 /// (`412` → [`Error::PreconditionFailed`]). Already gone (`404`) counts as done.
 pub async fn delete(account: &Account, url: &Url, etag: Option<&str>) -> Result<(), Error> {
     let url = check_url(url.as_str(), &UrlPolicy::default())?;
+    trusted(account, &url)?;
     let client = client_for(&url).await?;
     delete_with(&client, account, url, etag).await
 }
@@ -160,7 +169,7 @@ pub async fn validate_folder(account: &Account, url: &str) -> Result<Url, Error>
 }
 
 /// A client for `url`'s host alone, pinned to its checked addresses. Built per
-/// request, since discovery can hop hosts.
+/// request, since discovery can hop to another iCloud host (see [`trusted`]).
 async fn client_for(url: &Url) -> Result<reqwest::Client, Error> {
     let pinned = tokio::time::timeout(TIMEOUTS.connect, guard_host_async(url))
         .await
@@ -209,7 +218,7 @@ async fn query_with(
         .filter_map(|r| Some((r.href, r.etag, r.data?)))
         .map(|(href, etag, ics)| {
             Ok(Object {
-                href: resolve(&url, &href)?,
+                href: resolve(account, &url, &href)?,
                 etag,
                 ics,
             })
@@ -260,6 +269,7 @@ async fn propfind(
     depth: &str,
     body: &str,
 ) -> Result<(StatusCode, String), Error> {
+    trusted(account, url)?;
     let client = client_for(url).await?;
     let method = Method::from_bytes(b"PROPFIND").expect("valid method");
     let headers = [("Depth", depth), ("Content-Type", "application/xml")];
@@ -273,7 +283,8 @@ struct Reply {
     body: String,
 }
 
-/// One request with basic auth.
+/// One request with basic auth — only to the account's own origin
+/// ([`trusted`]), so a server-sent href can't carry the credentials elsewhere.
 async fn send(
     client: &reqwest::Client,
     account: &Account,
@@ -282,6 +293,7 @@ async fn send(
     headers: &[(&str, &str)],
     body: String,
 ) -> Result<Reply, Error> {
+    trusted(account, &url)?;
     let mut request = client
         .request(method.clone(), url.clone())
         .basic_auth(&account.username, Some(account.password.expose_secret()))
@@ -297,8 +309,45 @@ async fn send(
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = response.text().await.map_err(Error::Transport)?;
+    let body = read_capped(response, MAX_BODY).await?;
     Ok(Reply { status, etag, body })
+}
+
+/// The response body, read chunk by chunk and abandoned past `limit` bytes.
+/// The count is the authority, not `Content-Length`, which a server may omit
+/// or get wrong.
+async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<String, Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(Error::Transport)? {
+        if body.len() + chunk.len() > limit {
+            return Err(Error::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Whether the account's credentials may go to `url`: the origin (scheme,
+/// host, port) of [`Account::base`], and nothing else.
+///
+/// One exception, because iCloud needs it: an account on an `icloud.com`
+/// host may reach any other `icloud.com` host over https on the default
+/// port. `caldav.icloud.com` answers discovery, but the calendar home it
+/// names lives on a partition host such as `p42-caldav.icloud.com`.
+fn trusted(account: &Account, url: &Url) -> Result<(), Error> {
+    let base = &account.base;
+    if base.origin() == url.origin() {
+        return Ok(());
+    }
+    let icloud = |u: &Url| {
+        u.scheme() == "https"
+            && u.port().is_none()
+            && u.host_str().is_some_and(|h| h.ends_with(".icloud.com"))
+    };
+    if icloud(base) && icloud(url) {
+        return Ok(());
+    }
+    Err(Error::OtherHost(url.origin().ascii_serialization()))
 }
 
 fn failure(status: StatusCode) -> Error {
@@ -321,10 +370,13 @@ fn multistatus(status: StatusCode, body: &str) -> Result<Vec<Resource>, Error> {
 }
 
 /// Resolve a server-sent href against the URL it came from, under the same
-/// public-https policy as the user's own URL.
-fn resolve(base: &Url, href: &str) -> Result<Url, Error> {
+/// public-https policy as the user's own URL, and only onto an origin the
+/// account's credentials may go to ([`trusted`]).
+fn resolve(account: &Account, base: &Url, href: &str) -> Result<Url, Error> {
     let url = base.join(href).map_err(|_| Error::Url)?;
-    Ok(check_url(url.as_str(), &UrlPolicy::default())?)
+    let url = check_url(url.as_str(), &UrlPolicy::default())?;
+    trusted(account, &url)?;
+    Ok(url)
 }
 
 /// `#RRGGBB` from a CalDAV colour, which servers send as `#RRGGBB` or with an
@@ -511,19 +563,104 @@ mod tests {
     fn server_hrefs_resolve_against_their_origin_under_the_egress_policy() {
         let home = Url::parse("https://dav.example.com/calendars/anna/").unwrap();
         assert_eq!(
-            resolve(&home, "/calendars/anna/work/").unwrap().as_str(),
-            "https://dav.example.com/calendars/anna/work/"
-        );
-        assert_eq!(
-            resolve(&home, "https://p01-caldav.icloud.com/1/calendars/")
+            resolve(&account(), &home, "/calendars/anna/work/")
                 .unwrap()
-                .host_str(),
-            Some("p01-caldav.icloud.com")
+                .as_str(),
+            "https://dav.example.com/calendars/anna/work/"
         );
         // A server may not bounce discovery onto plain http.
         assert!(matches!(
-            resolve(&home, "http://dav.example.com/calendars/"),
+            resolve(&account(), &home, "http://dav.example.com/calendars/"),
             Err(Error::Egress(oxidt_egress::Error::Scheme))
+        ));
+    }
+
+    #[test]
+    fn an_href_on_another_origin_is_refused_before_the_credentials_go_there() {
+        let home = Url::parse("https://dav.example.com/calendars/anna/").unwrap();
+        for href in [
+            "https://evil.example.net/calendars/",
+            "https://p01-caldav.icloud.com/1/calendars/",
+            "https://dav.example.com:8443/calendars/",
+        ] {
+            assert!(
+                matches!(resolve(&account(), &home, href), Err(Error::OtherHost(_))),
+                "{href}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_icloud_account_may_move_to_its_partition_host_and_nowhere_else() {
+        let icloud = Account {
+            base: Url::parse("https://caldav.icloud.com/").unwrap(),
+            ..account()
+        };
+        let principal = Url::parse("https://caldav.icloud.com/123/principal/").unwrap();
+        // How iCloud names the calendar home: absolute, default port spelled out.
+        let home = resolve(
+            &icloud,
+            &principal,
+            "https://p42-caldav.icloud.com:443/123/calendars/",
+        )
+        .unwrap();
+        assert_eq!(
+            home.as_str(),
+            "https://p42-caldav.icloud.com/123/calendars/"
+        );
+        // A collection stored from discovery is still the account's to write.
+        let collection = Url::parse("https://p42-caldav.icloud.com/123/calendars/home/").unwrap();
+        trusted(&icloud, &collection).unwrap();
+
+        for href in [
+            "https://caldav.icloud.com.evil.com/x/",
+            "https://evil-icloud.com/x/",
+            "https://p42-caldav.icloud.com:8443/x/",
+        ] {
+            assert!(
+                matches!(resolve(&icloud, &principal, href), Err(Error::OtherHost(_))),
+                "{href}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_to_another_origin_never_leaves_with_the_credentials() {
+        // Refused before the client is used, so no server is needed.
+        let url = Url::parse("https://evil.example.net/cal/x.ics").unwrap();
+        let outcome = put_with(
+            &reqwest::Client::new(),
+            &account(),
+            url.clone(),
+            "",
+            PutMode::Overwrite,
+        )
+        .await;
+        assert!(matches!(outcome, Err(Error::OtherHost(o)) if o == "https://evil.example.net"));
+        let outcome = delete_with(&reqwest::Client::new(), &account(), url.clone(), None).await;
+        assert!(matches!(outcome, Err(Error::OtherHost(_))));
+
+        // The public entry points refuse before resolving the other host.
+        let collection = Url::parse("https://evil.example.net/cal/").unwrap();
+        assert!(matches!(
+            query(&account(), &collection, Query::Todos).await,
+            Err(Error::OtherHost(_))
+        ));
+        assert!(matches!(
+            put_ics(&account(), &collection, "x", "", PutMode::Overwrite).await,
+            Err(Error::OtherHost(_))
+        ));
+        assert!(matches!(
+            put_object(&account(), &url, "", PutMode::Overwrite).await,
+            Err(Error::OtherHost(_))
+        ));
+        assert!(matches!(
+            delete(&account(), &url, None).await,
+            Err(Error::OtherHost(_))
+        ));
+        assert!(matches!(
+            validate_folder(&account(), "https://evil.example.net/notes").await,
+            Err(Error::OtherHost(o)) if o == "https://evil.example.net"
         ));
     }
 
@@ -548,7 +685,14 @@ mod tests {
     #[tokio::test]
     async fn a_collection_on_the_private_network_is_refused_before_any_request() {
         let collection = Url::parse("https://169.254.169.254/dav/").unwrap();
-        let outcome = put_ics(&account(), &collection, "x", "", PutMode::Overwrite).await;
+        let outcome = put_ics(
+            &account_at(&collection),
+            &collection,
+            "x",
+            "",
+            PutMode::Overwrite,
+        )
+        .await;
         assert!(matches!(
             outcome,
             Err(Error::Egress(oxidt_egress::Error::Forbidden(_)))
@@ -566,8 +710,13 @@ mod tests {
     }
 
     fn account() -> Account {
+        account_at(&Url::parse("https://dav.example.com/").unwrap())
+    }
+
+    /// An account whose own origin is `base` — the loopback test server's.
+    fn account_at(base: &Url) -> Account {
         Account {
-            base: Url::parse("https://dav.example.com/").unwrap(),
+            base: base.clone(),
             username: "anna".into(),
             password: "app-password".into(),
         }
@@ -626,7 +775,7 @@ mod tests {
         let url = resource_url(&collection, "abc").unwrap();
         let outcome = put_with(
             &reqwest::Client::new(),
-            &account(),
+            &account_at(&collection),
             url,
             "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
             PutMode::CreateOnly,
@@ -647,7 +796,7 @@ mod tests {
         let url = resource_url(&collection, "abc").unwrap();
         let outcome = put_with(
             &reqwest::Client::new(),
-            &account(),
+            &account_at(&collection),
             url,
             "",
             PutMode::Overwrite,
@@ -669,7 +818,7 @@ mod tests {
         let url = resource_url(&collection, "abc").unwrap();
         let stored = put_with(
             &reqwest::Client::new(),
-            &account(),
+            &account_at(&collection),
             url,
             "",
             PutMode::IfMatch("\"v1\""),
@@ -688,7 +837,7 @@ mod tests {
         let url = resource_url(&collection, "abc").unwrap();
         let outcome = put_with(
             &reqwest::Client::new(),
-            &account(),
+            &account_at(&collection),
             url,
             "",
             PutMode::IfMatch("\"v1\""),
@@ -701,16 +850,22 @@ mod tests {
     async fn delete_treats_already_gone_as_done_and_a_412_as_changed() {
         let (collection, request) = serve_once("404 Not Found");
         let url = resource_url(&collection, "abc").unwrap();
-        delete_with(&reqwest::Client::new(), &account(), url, Some("\"v1\""))
-            .await
-            .unwrap();
+        delete_with(
+            &reqwest::Client::new(),
+            &account_at(&collection),
+            url,
+            Some("\"v1\""),
+        )
+        .await
+        .unwrap();
         let head = request.recv().unwrap().to_ascii_lowercase();
         assert!(head.starts_with("delete /cal/abc.ics "), "{head}");
         assert!(head.contains("if-match: \"v1\""), "{head}");
 
         let (collection, request) = serve_once("412 Precondition Failed");
         let url = resource_url(&collection, "abc").unwrap();
-        let outcome = delete_with(&reqwest::Client::new(), &account(), url, None).await;
+        let outcome =
+            delete_with(&reqwest::Client::new(), &account_at(&collection), url, None).await;
         assert!(matches!(outcome, Err(Error::PreconditionFailed)));
         assert!(
             !request
@@ -773,7 +928,7 @@ END:VCALENDAR
         let (collection, request) = serve_once_with("207 Multi-Status", "", BODY);
         let outcome = query_with(
             &reqwest::Client::new(),
-            &account(),
+            &account_at(&collection),
             collection,
             Query::Todos,
         )
@@ -787,6 +942,46 @@ END:VCALENDAR
         let head = request.recv().unwrap().to_ascii_lowercase();
         assert!(head.starts_with("report /cal/ "), "{head}");
         assert!(head.contains("depth: 1"), "{head}");
+    }
+
+    /// A one-shot loopback server that writes `response` verbatim — status
+    /// line, headers and body — then closes.
+    fn serve_raw(response: String) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let mut stream = stream;
+            // The client may hang up mid-body once the cap is hit.
+            let _ = stream.write_all(response.as_bytes());
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_cap_is_an_error_with_or_without_a_length() {
+        let body = "x".repeat(64);
+        for response in [
+            format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{body}"
+            ),
+            // No Content-Length: only counting the bytes catches it.
+            format!("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n{body}"),
+        ] {
+            let url = serve_raw(response);
+            let reply = reqwest::get(url.clone()).await.unwrap();
+            assert!(matches!(read_capped(reply, 63).await, Err(Error::TooLarge)));
+        }
+        let url = serve_raw(format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}"
+        ));
+        let reply = reqwest::get(url).await.unwrap();
+        assert_eq!(read_capped(reply, 64).await.unwrap(), body);
     }
 
     #[test]

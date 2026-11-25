@@ -31,11 +31,25 @@
 //! ## Every request goes through oxidt-egress
 //!
 //! The account URL is user input, and discovery follows hrefs the server
-//! sends back — which may point at another host. Each request is therefore
-//! checked on its own: public https only ([`oxidt_egress::check_url`]), every
-//! resolved address checked, the connection pinned to those addresses, no
-//! proxy, and no redirects. A `PUT` that followed a redirect would be a write
-//! to a URL the user never saw.
+//! sends back. Each request is therefore checked on its own: public https only
+//! ([`oxidt_egress::check_url`]), every resolved address checked, the
+//! connection pinned to those addresses, no proxy, and no redirects. A `PUT`
+//! that followed a redirect would be a write to a URL the user never saw.
+//!
+//! ## Credentials stay on the account's origin
+//!
+//! Every request carries the account's Basic credentials, so every request
+//! must go to the origin (scheme, host, port) of [`Account::base`]. A
+//! server-sent href, or a URL passed in, that names another origin is
+//! [`Error::OtherHost`], and nothing is sent. The one exception is iCloud: an
+//! account on an `icloud.com` host may reach other `icloud.com` hosts over
+//! https on the default port, because `caldav.icloud.com` puts the calendar
+//! home on a partition host such as `p42-caldav.icloud.com`. A WebDAV folder
+//! on a different host than the calendar server needs an [`Account`] of its
+//! own, with that folder as its `base`.
+//!
+//! Response bodies are capped at 8 MiB, error pages included; past that the
+//! request fails with [`Error::TooLarge`].
 
 mod dav;
 mod error;
